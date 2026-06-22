@@ -1,22 +1,24 @@
 # FIRST Intelligence
 
-App Streamlit para forecast estratégico de estoque, compras, transferências por ARMZ e inteligência de locação.
+App Streamlit para forecast estratégico de estoque, compras e locação.
 
-## Como rodar localmente
+## Como usar
+
+1. Coloque os arquivos fixos na pasta `dados`:
+   - `faturamento.xlsx`
+   - `estoque.xlsx`
+   - `contratos.xlsx` opcional
+2. Execute:
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Bases esperadas
+## Lógica principal
 
-1. Relatório de Faturamento 2026 em Excel, com guia `Base`.
-2. Relatório MATR260 de estoque em Excel, contendo a coluna `ARMZ`.
-
-## Lógica padrão
-
-- Horizonte: 30 dias.
-- Forecast: 70% consumo dos últimos 30 dias + 30% histórico dos últimos 180 dias.
-- Estoque de segurança: parametrizável no menu lateral.
-- Transferência: prioriza redistribuição entre ARMZ antes de sugerir compra.
+- Grupo oficial vem somente do estoque/MATR260.
+- Códigos com sufixos como `_RV`, `_TC`, `_AT` são cruzados por `Produto_Base`.
+- Locação não entra como consumo de estoque para compra.
+- Compras são sugeridas com base em venda/outros.
+- Locação vira módulo separado de recorrência e expansão de parque.
