@@ -123,6 +123,20 @@ def brl(value: float, short: bool = False) -> str:
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+
+def usd(value: float, short: bool = False) -> str:
+    try:
+        value = float(value)
+    except Exception:
+        value = 0.0
+    if short:
+        abs_v = abs(value)
+        if abs_v >= 1_000_000:
+            return f"US$ {value/1_000_000:,.2f} MM".replace(",", "X").replace(".", ",").replace("X", ".")
+        if abs_v >= 1_000:
+            return f"US$ {value/1_000:,.1f} mil".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"US$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 def fmt_num(value: float, casas: int = 0) -> str:
     try:
         value = float(value)
@@ -170,7 +184,7 @@ def money_cols_config(cols: list[str]) -> dict:
     cfg = {}
     for c in cols:
         n = normalize_col(c)
-        if any(k in n for k in ["VALOR", "RECEITA", "COMPRAR_R", "CAPITAL", "CUSTO"]):
+        if any(k in n for k in ["VALOR", "RECEITA", "COMPRAR_R", "CAPITAL", "CUSTO", "USD"]):
             cfg[c] = st.column_config.NumberColumn(c.replace("_", " "), format="R$ %.2f")
         elif any(k in n for k in ["COBERTURA", "FORECAST", "CONSUMO", "INDICE", "SCORE"]):
             cfg[c] = st.column_config.NumberColumn(c.replace("_", " "), format="%.1f")
@@ -314,47 +328,227 @@ def load_microtech(file_bytes: bytes) -> dict[str, pd.DataFrame]:
     return out
 
 
-def summarize_microtech(book: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # Procura uma aba com cara de rolling forecast; se não achar, usa a primeira que possua SKU/produto e colunas numéricas.
-    ordered = sorted(book.items(), key=lambda kv: ("ROLLING" not in normalize_col(kv[0]), "FORECAST" not in normalize_col(kv[0])))
-    summaries = []
-    sheet_summary = []
-    for sheet, df in ordered:
-        if df.empty:
-            continue
-        sku_col = find_col(df, ["SKU", "Item", "Produto", "Code", "Código", "Codigo", "Part Number"], required=False)
-        fam_col = find_col(df, ["Family", "Familia", "Família", "Linha", "Grupo"], required=False)
-        numeric_cols = [c for c in df.columns if c != sku_col and pd.to_numeric(df[c], errors="coerce").notna().sum() >= max(3, len(df) * 0.10)]
-        sheet_summary.append({"Aba": sheet, "Linhas": len(df), "Colunas Numéricas": len(numeric_cols), "Coluna SKU": sku_col or ""})
-        if sku_col and numeric_cols:
-            tmp = df[[sku_col] + ([fam_col] if fam_col else []) + numeric_cols].copy()
-            tmp[sku_col] = tmp[sku_col].map(normalize_code)
-            tmp = tmp[tmp[sku_col].ne("")]
-            for c in numeric_cols:
-                tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0)
-            tmp["Total Planejado"] = tmp[numeric_cols].sum(axis=1)
-            tmp["Média por Período"] = tmp[numeric_cols].mean(axis=1)
-            tmp["Aba Origem"] = sheet
-            tmp = tmp.rename(columns={sku_col: "SKU"})
-            if fam_col:
-                tmp = tmp.rename(columns={fam_col: "Família"})
-            else:
-                tmp["Família"] = ""
-            summaries.append(tmp[["SKU", "Família", "Total Planejado", "Média por Período", "Aba Origem"]])
-            # usa a primeira aba forte como resumo principal
-            if "ROLLING" in normalize_col(sheet) or "FORECAST" in normalize_col(sheet):
-                break
-    if summaries:
-        final = pd.concat(summaries, ignore_index=True)
-        final = final.groupby(["SKU", "Família"], as_index=False).agg(
-            Total_Planejado=("Total Planejado", "sum"),
-            Media_Periodo=("Média por Período", "mean"),
-            Aba_Origem=("Aba Origem", "first"),
-        ).sort_values("Total_Planejado", ascending=False)
-    else:
-        final = pd.DataFrame(columns=["SKU", "Família", "Total_Planejado", "Media_Periodo", "Aba_Origem"])
-    return final, pd.DataFrame(sheet_summary)
 
+def parse_number(value: object) -> float:
+    """Converte números vindos de Excel, texto com moeda ou separadores BR/US."""
+    if pd.isna(value):
+        return 0.0
+    if isinstance(value, (int, float, np.number)):
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+    txt = str(value).strip()
+    if not txt:
+        return 0.0
+    txt = txt.replace("$", "").replace("R$", "").replace("US$", "").replace("USD", "")
+    txt = txt.replace(" ", "")
+    # Formato BR: 1.234,56
+    if "," in txt and "." in txt and txt.rfind(",") > txt.rfind("."):
+        txt = txt.replace(".", "").replace(",", ".")
+    elif "," in txt and "." not in txt:
+        txt = txt.replace(",", ".")
+    txt = re.sub(r"[^0-9\.-]", "", txt)
+    try:
+        return float(txt)
+    except Exception:
+        return 0.0
+
+
+def parse_microtech_sales_qty(book: dict[str, pd.DataFrame], sheet_name: str) -> pd.DataFrame:
+    df = book.get(sheet_name, pd.DataFrame()).copy()
+    if df.empty:
+        return pd.DataFrame()
+    df.columns = [str(c).strip() for c in df.columns]
+    id_col = df.columns[0]
+    out = df.rename(columns={id_col: "SKU" if "SKU" in normalize_col(sheet_name) else "Família"}).copy()
+    for c in out.columns[1:]:
+        out[c] = out[c].map(parse_number)
+    anos = [c for c in out.columns if re.fullmatch(r"20\d{2}", str(c))]
+    if anos:
+        ano_final = sorted(anos)[-1]
+        ano_base = sorted(anos)[-2] if len(anos) >= 2 else None
+        out["Qtd Atual"] = out[ano_final]
+        out["Ano Atual"] = str(ano_final)
+        if ano_base:
+            out["Crescimento %"] = np.where(out[ano_base] > 0, (out[ano_final] / out[ano_base]) - 1, np.where(out[ano_final] > 0, 1, 0))
+        else:
+            out["Crescimento %"] = 0
+    return out
+
+
+def parse_microtech_sales_money(book: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    df = book.get("Sales by SKU - $", pd.DataFrame()).copy()
+    if df.empty:
+        return pd.DataFrame()
+    df.columns = [str(c).strip() for c in df.columns]
+    id_col = df.columns[0]
+    out = pd.DataFrame({"SKU": df[id_col].map(normalize_code)})
+    value_cols = [c for c in df.columns[1:] if "SALES" in normalize_col(c) or re.search(r"20\d{2}", str(c))]
+    for c in value_cols:
+        year = re.search(r"20\d{2}", str(c))
+        name = year.group(0) if year else str(c)
+        out[name] = df[c].map(parse_number)
+    anos = [c for c in out.columns if re.fullmatch(r"20\d{2}", str(c))]
+    if anos:
+        out["Receita Atual USD"] = out[sorted(anos)[-1]]
+    return out[out["SKU"].ne("")]
+
+
+def parse_microtech_rolling(book: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    # Lê diretamente do workbook raw para preservar as duas linhas de cabeçalho.
+    if "Rolling Forecast" not in book:
+        return pd.DataFrame()
+    try:
+        # book já tem header=0; para esta aba é melhor reabrir via ExcelFile no load? Fallback usando estrutura conhecida.
+        # Como o header=0 perde a linha superior, tentamos com o dataframe original carregado: as colunas vieram como Unnamed e a primeira linha ainda contém dados.
+        # Mais robusto: reconstruir a partir de book com colunas + linhas.
+        df0 = book["Rolling Forecast"].copy()
+        # Se já veio com colunas estranhas, relê a partir do objeto salvo em st.session não existe. Então tratamos pelo padrão.
+        # read_excel padrão deixou linha 0 do arquivo como header; nesse arquivo os dados úteis começam nas linhas com Reference Code.
+    except Exception:
+        return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def load_microtech_raw(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+    return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, engine="openpyxl", header=None)
+
+
+@st.cache_data(show_spinner=False)
+def build_microtech_strategy(file_bytes: bytes) -> dict[str, pd.DataFrame]:
+    xl = pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
+    book_std = {s: pd.read_excel(BytesIO(file_bytes), sheet_name=s, engine="openpyxl").dropna(how="all") for s in xl.sheet_names}
+
+    # 1) Rolling Forecast 2026 por SKU
+    rolling = pd.DataFrame()
+    if "Rolling Forecast" in xl.sheet_names:
+        raw = load_microtech_raw(file_bytes, "Rolling Forecast")
+        header_row = None
+        for i in range(min(len(raw), 15)):
+            row_vals = [normalize_col(v) for v in raw.iloc[i].tolist()]
+            if "REFERENCE_CODE" in row_vals:
+                header_row = i
+                break
+        if header_row is not None and header_row > 0:
+            months_row = raw.iloc[header_row - 1]
+            sub_row = raw.iloc[header_row]
+            data = raw.iloc[header_row + 1:].copy()
+            code_col = list(sub_row.map(normalize_col)).index("REFERENCE_CODE")
+            desc_col = None
+            for j, v in enumerate(sub_row.map(normalize_col)):
+                if "PRODUCT_DESCRIPTION" in v:
+                    desc_col = j
+                    break
+            qty_cols, usd_cols = [], []
+            months = ["JAN", "FEB", "MAR", "ABR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+            for j in range(raw.shape[1]):
+                m = norm_text(months_row.iloc[j])
+                sub = norm_text(sub_row.iloc[j])
+                if m in months and sub == "QTY":
+                    qty_cols.append(j)
+                if m in months and sub == "USD":
+                    usd_cols.append(j)
+            rows = []
+            for _, r in data.iterrows():
+                sku = normalize_code(r.iloc[code_col])
+                if not sku or sku in ["TOTAL", "NAN"]:
+                    continue
+                qtd_total = sum(parse_number(r.iloc[j]) for j in qty_cols)
+                usd_total = sum(parse_number(r.iloc[j]) * parse_number(r.iloc[j-1]) if j-1 in qty_cols else 0 for j in usd_cols)
+                # O arquivo também possui coluna TOTAL em USD; usa se existir e for maior.
+                total_cols = [j for j in range(raw.shape[1]) if norm_text(months_row.iloc[j]) == "TOTAL"]
+                total_usd = max([parse_number(r.iloc[j]) for j in total_cols] + [usd_total])
+                rows.append({
+                    "SKU": sku,
+                    "Descrição Microtech": str(r.iloc[desc_col]).strip() if desc_col is not None and not pd.isna(r.iloc[desc_col]) else "",
+                    "Forecast 2026 Qtd": qtd_total,
+                    "Forecast 2026 USD": total_usd,
+                    "Média Mensal Forecast": qtd_total / 12 if qtd_total else 0,
+                })
+            rolling = pd.DataFrame(rows)
+            if not rolling.empty:
+                rolling = rolling.groupby(["SKU", "Descrição Microtech"], as_index=False).sum(numeric_only=True)
+
+    # 2) Crescimento por SKU e por Família
+    sku_qty = parse_microtech_sales_qty(book_std, "Sales by SKU - QTY") if "Sales by SKU - QTY" in book_std else pd.DataFrame()
+    if not sku_qty.empty:
+        sku_qty["SKU"] = sku_qty["SKU"].map(normalize_code)
+        sku_qty = sku_qty[sku_qty["SKU"].ne("")]
+    fam_qty = parse_microtech_sales_qty(book_std, "Sales Hist by FAMILY QTY") if "Sales Hist by FAMILY QTY" in book_std else pd.DataFrame()
+    sku_money = parse_microtech_sales_money(book_std)
+
+    # 3) Purchase x Sell Out por família
+    pvs = pd.DataFrame()
+    if "Purchases vs Sell Out" in xl.sheet_names:
+        raw = load_microtech_raw(file_bytes, "Purchases vs Sell Out")
+        # Mapeia colunas por ano + trimestre.
+        years = []
+        last_year = ""
+        for j in range(raw.shape[1]):
+            y = str(raw.iloc[0, j]).strip()
+            if re.fullmatch(r"20\d{2}", y):
+                last_year = y
+            years.append(last_year)
+        qs = [str(raw.iloc[1, j]).strip() for j in range(raw.shape[1])]
+        periods = {j: f"{years[j]} {qs[j]}" for j in range(1, raw.shape[1]) if years[j] and re.fullmatch(r"Q[1-4]", qs[j])}
+        def collect_section(start_label: str, end_start: int) -> pd.DataFrame:
+            rows = []
+            for i in range(end_start, len(raw)):
+                name = str(raw.iloc[i, 0]).strip()
+                if not name or name.upper() in ["NAN", "TOTAL"]:
+                    if name.upper() == "TOTAL":
+                        continue
+                    continue
+                if "TOTAL" in name.upper() or name.upper() in ["PURCHASES", "SELL OUT"]:
+                    continue
+                d = {"Família": name}
+                for j, per in periods.items():
+                    d[per] = parse_number(raw.iloc[i, j])
+                rows.append(d)
+            return pd.DataFrame(rows)
+        # Blocos conhecidos: compras linhas 2:12, sell-out 16:26
+        compras_sec = collect_section("compras", 2).iloc[:10] if len(raw) > 12 else pd.DataFrame()
+        sell_sec = collect_section("sell", 16).iloc[:10] if len(raw) > 26 else pd.DataFrame()
+        if not compras_sec.empty and not sell_sec.empty:
+            compras_long = compras_sec.melt(id_vars="Família", var_name="Período", value_name="Compras")
+            sell_long = sell_sec.melt(id_vars="Família", var_name="Período", value_name="Sell Out")
+            pvs = compras_long.merge(sell_long, on=["Família", "Período"], how="outer").fillna(0)
+            pvs_resumo = pvs.groupby("Família", as_index=False).agg(Compras=("Compras", "sum"), Sell_Out=("Sell Out", "sum"))
+            pvs_resumo["Diferença"] = pvs_resumo["Compras"] - pvs_resumo["Sell_Out"]
+            pvs_resumo["Cobertura Compra/SellOut"] = np.where(pvs_resumo["Sell_Out"] > 0, pvs_resumo["Compras"] / pvs_resumo["Sell_Out"], np.nan)
+            pvs = pvs_resumo.sort_values("Diferença", ascending=False)
+
+    # 4) Master SKU para score Microtech
+    master = pd.DataFrame()
+    if not sku_qty.empty:
+        master = sku_qty[["SKU", "Qtd Atual", "Crescimento %"]].copy()
+    if not rolling.empty:
+        master = rolling.merge(master, on="SKU", how="outer") if not master.empty else rolling.copy()
+    if not sku_money.empty:
+        master = master.merge(sku_money[["SKU", "Receita Atual USD"]], on="SKU", how="left") if not master.empty else sku_money.copy()
+    if not master.empty:
+        for c in ["Forecast 2026 Qtd", "Forecast 2026 USD", "Média Mensal Forecast", "Qtd Atual", "Crescimento %", "Receita Atual USD"]:
+            if c not in master.columns:
+                master[c] = 0
+            master[c] = pd.to_numeric(master[c], errors="coerce").fillna(0)
+        # Score: crescimento + forecast + receita atual. Escalas por ranking para funcionar em qualquer arquivo.
+        def pct_rank(s):
+            return s.rank(pct=True).fillna(0) * 100
+        master["Score Microtech"] = (
+            pct_rank(master["Forecast 2026 Qtd"]) * 0.35
+            + pct_rank(master["Qtd Atual"]) * 0.25
+            + pct_rank(master["Receita Atual USD"]) * 0.20
+            + np.clip(master["Crescimento %"], -1, 2).add(1).div(3).mul(100) * 0.20
+        ).round(1)
+        master["Sinal Estratégico"] = np.select(
+            [master["Score Microtech"] >= 80, master["Score Microtech"] >= 55, master["Score Microtech"] >= 30],
+            ["🚀 Priorizar", "🟡 Monitorar", "🔵 Manter"],
+            default="⚪ Baixa prioridade",
+        )
+        master = master.sort_values("Score Microtech", ascending=False)
+
+    return {"rolling": rolling, "sku_qty": sku_qty, "familia_qty": fam_qty, "sku_money": sku_money, "pvs": pvs, "master": master}
 
 def build_forecast(estoque: pd.DataFrame, faturamento: pd.DataFrame, horizonte: int = 30, dias_seguranca: int = 15):
     fat_all = faturamento.copy()
@@ -687,20 +881,93 @@ with aba9:
         st.info("Envie o arquivo de planejamento Microtech ou mantenha `/dados/microtech.xlsx` no Git.")
     else:
         try:
-            micro_book = load_microtech(micro_bytes)
-            micro_resumo, micro_abas = summarize_microtech(micro_book)
-            df_view(micro_abas)
-            if micro_resumo.empty:
-                st.warning("Não consegui identificar automaticamente SKU e colunas numéricas de forecast. A tabela acima mostra as abas disponíveis para ajuste do parser.")
+            micro = build_microtech_strategy(micro_bytes)
+            master = micro.get("master", pd.DataFrame())
+            rolling = micro.get("rolling", pd.DataFrame())
+            sku_qty = micro.get("sku_qty", pd.DataFrame())
+            familia_qty = micro.get("familia_qty", pd.DataFrame())
+            pvs = micro.get("pvs", pd.DataFrame())
+
+            if master.empty and rolling.empty and sku_qty.empty and familia_qty.empty and pvs.empty:
+                st.warning("Arquivo Microtech carregado, mas o layout não foi reconhecido para as análises estratégicas.")
             else:
-                # Cruza Microtech com estoque quando possível.
-                micro_resumo["Produto"] = micro_resumo["SKU"].map(produto_base)
-                micro_join = micro_resumo.merge(view[["Produto", "Estoque_Disponível", "Valor_Estoque", "Grupo", "Status"]], on="Produto", how="left")
-                micro_join["Cobertura_Estratégica_Períodos"] = np.where(micro_join["Media_Periodo"] > 0, micro_join["Estoque_Disponível"] / micro_join["Media_Periodo"], np.nan)
-                df_view(micro_join.sort_values("Total_Planejado", ascending=False).head(300))
-                st.plotly_chart(px.bar(micro_join.head(20), x="SKU", y="Total_Planejado", title="Top 20 SKUs Microtech - Planejamento"), use_container_width=True)
+                # Cruza SKU com estoque atual da First quando houver SKU equivalente.
+                if not master.empty:
+                    master["Produto"] = master["SKU"].map(produto_base)
+                    master_join = master.merge(
+                        view[["Produto", "Estoque_Disponível", "Valor_Estoque", "Grupo", "Status", "Cobertura_Dias"]],
+                        on="Produto", how="left"
+                    )
+                    master_join["Cobertura Importação Meses"] = np.where(
+                        master_join["Média Mensal Forecast"].fillna(0) > 0,
+                        master_join["Estoque_Disponível"].fillna(0) / master_join["Média Mensal Forecast"],
+                        np.nan,
+                    )
+                    master_join["Risco Importação"] = np.select(
+                        [master_join["Cobertura Importação Meses"].fillna(999) < 3, master_join["Cobertura Importação Meses"].fillna(999) < 6],
+                        ["🔴 Risco", "🟡 Atenção"],
+                        default="🟢 Confortável",
+                    )
+                else:
+                    master_join = pd.DataFrame()
+
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    kpi_card("SKUs Microtech", fmt_num(master["SKU"].nunique() if not master.empty else 0), "Base estratégica")
+                with c2:
+                    kpi_card("Forecast 2026", fmt_num(master["Forecast 2026 Qtd"].sum() if "Forecast 2026 Qtd" in master else 0), "Quantidade planejada")
+                with c3:
+                    kpi_card("Forecast USD", usd(master["Forecast 2026 USD"].sum() if "Forecast 2026 USD" in master else 0, short=True), "Planejamento fabricante")
+                with c4:
+                    risco = int(master_join["Risco Importação"].eq("🔴 Risco").sum()) if not master_join.empty and "Risco Importação" in master_join else 0
+                    kpi_card("Risco Importação", fmt_num(risco), "Cobertura < 3 meses")
+
+                mt1, mt2, mt3, mt4 = st.tabs(["🚀 Oportunidades", "📈 Rolling Forecast", "🔁 Compra x Sell-Out", "🏷️ Famílias"])
+
+                with mt1:
+                    if master_join.empty:
+                        st.info("Sem SKUs suficientes para montar o score estratégico.")
+                    else:
+                        cols = [
+                            "SKU", "Descrição Microtech", "Grupo", "Estoque_Disponível", "Valor_Estoque",
+                            "Qtd Atual", "Crescimento %", "Forecast 2026 Qtd", "Média Mensal Forecast",
+                            "Cobertura Importação Meses", "Risco Importação", "Receita Atual USD", "Score Microtech", "Sinal Estratégico"
+                        ]
+                        cols = [c for c in cols if c in master_join.columns]
+                        df_view(master_join.sort_values("Score Microtech", ascending=False)[cols].head(300))
+                        top = master_join.sort_values("Score Microtech", ascending=False).head(20)
+                        st.plotly_chart(px.bar(top, x="SKU", y="Score Microtech", title="Top 20 Oportunidades Microtech"), use_container_width=True)
+
+                with mt2:
+                    if rolling.empty:
+                        st.info("Rolling Forecast não identificado no arquivo.")
+                    else:
+                        rview = rolling.sort_values("Forecast 2026 Qtd", ascending=False).head(300)
+                        df_view(rview)
+                        st.plotly_chart(px.bar(rview.head(20), x="SKU", y="Forecast 2026 Qtd", title="Top 20 SKUs por Forecast 2026"), use_container_width=True)
+
+                with mt3:
+                    if pvs.empty:
+                        st.info("Compra x Sell-Out não identificado no arquivo.")
+                    else:
+                        pvs2 = pvs.copy()
+                        pvs2["Sinal"] = np.select(
+                            [pvs2["Diferença"] > 0, pvs2["Diferença"] < 0],
+                            ["Comprou acima do sell-out", "Sell-out acima da compra"],
+                            default="Equilibrado",
+                        )
+                        df_view(pvs2.sort_values("Diferença", ascending=False))
+                        st.plotly_chart(px.bar(pvs2, x="Família", y=["Compras", "Sell_Out"], barmode="group", title="Compras Microtech x Sell-Out First"), use_container_width=True)
+
+                with mt4:
+                    if familia_qty.empty:
+                        st.info("Histórico por família não identificado no arquivo.")
+                    else:
+                        cols = [c for c in ["Família", "2023", "2024", "2025", "Qtd Atual", "Crescimento %"] if c in familia_qty.columns]
+                        df_view(familia_qty.sort_values("Qtd Atual", ascending=False)[cols])
+                        st.plotly_chart(px.bar(familia_qty.sort_values("Qtd Atual", ascending=False).head(20), x="Família", y="Qtd Atual", title="Top Famílias Microtech"), use_container_width=True)
         except Exception as e:
-            st.error("Não consegui processar o arquivo Microtech automaticamente.")
+            st.error("Não consegui processar a aba Microtech.")
             st.exception(e)
 
 st.divider()
