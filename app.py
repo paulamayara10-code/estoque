@@ -175,6 +175,43 @@ def to_excel_download(sheets: dict[str, pd.DataFrame]) -> bytes:
     return output.getvalue()
 
 
+
+
+def is_probably_excel(file_bytes: bytes) -> bool:
+    """Valida se o arquivo parece um Excel real antes do pandas tentar abrir.
+
+    .xlsx começa com PK (arquivo zip). .xls antigo começa com D0 CF.
+    Isso evita o erro confuso 'Excel file format cannot be determined' quando
+    o Git salva um ponteiro/texto no lugar do arquivo Excel real.
+    """
+    if not file_bytes:
+        return False
+    head = file_bytes[:8]
+    return head.startswith(b"PK") or head.startswith(b"\xd0\xcf\x11\xe0")
+
+
+def read_excel_safe(file_bytes: bytes, sheet_name=0, **kwargs) -> pd.DataFrame:
+    if not is_probably_excel(file_bytes):
+        preview = file_bytes[:120].decode("utf-8", errors="ignore").replace("\n", " ")
+        raise ValueError(
+            "O arquivo encontrado não parece ser um Excel válido. "
+            "No GitHub, confirme se o arquivo foi enviado como binário real (.xlsx) "
+            "e não como atalho/ponteiro ou arquivo vazio. "
+            f"Prévia do conteúdo: {preview}"
+        )
+    return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, engine="openpyxl", **kwargs)
+
+
+def excel_file_safe(file_bytes: bytes) -> pd.ExcelFile:
+    if not is_probably_excel(file_bytes):
+        preview = file_bytes[:120].decode("utf-8", errors="ignore").replace("\n", " ")
+        raise ValueError(
+            "O arquivo encontrado não parece ser um Excel válido. "
+            "Substitua o arquivo na pasta /dados por um .xlsx exportado de verdade. "
+            f"Prévia do conteúdo: {preview}"
+        )
+    return pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
+
 def read_file_bytes(uploaded_file, default_path: Path) -> tuple[Optional[bytes], str]:
     if uploaded_file is not None:
         return uploaded_file.getvalue(), "Upload da sessão"
@@ -187,7 +224,7 @@ def read_file_bytes(uploaded_file, default_path: Path) -> tuple[Optional[bytes],
 # =========================
 @st.cache_data(show_spinner=False)
 def load_faturamento(file_bytes: bytes, sheet_name: str = "Base") -> pd.DataFrame:
-    df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name)
+    df = read_excel_safe(file_bytes, sheet_name=sheet_name)
     df.columns = [str(c).strip() for c in df.columns]
 
     col_data = find_col(df, ["DT Emissao", "Data Emissao", "Emissao"])
@@ -235,16 +272,16 @@ def load_faturamento(file_bytes: bytes, sheet_name: str = "Base") -> pd.DataFram
 @st.cache_data(show_spinner=False)
 def load_estoque(file_bytes: bytes, sheet_name: Optional[str] = None) -> pd.DataFrame:
     if sheet_name:
-        df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name)
+        df = read_excel_safe(file_bytes, sheet_name=sheet_name)
     else:
-        xl = pd.ExcelFile(BytesIO(file_bytes))
+        xl = excel_file_safe(file_bytes)
         target = None
         for s in xl.sheet_names:
             if "RELACAO" in normalize_col(s) or "POSICAO" in normalize_col(s):
                 target = s
                 break
         target = target or xl.sheet_names[-1]
-        df = pd.read_excel(BytesIO(file_bytes), sheet_name=target)
+        df = read_excel_safe(file_bytes, sheet_name=target)
 
     df.columns = [str(c).strip() for c in df.columns]
     col_codigo = find_col(df, ["CODIGO", "Código", "Produto"])
@@ -283,9 +320,9 @@ def load_contratos(file_bytes: Optional[bytes]) -> pd.DataFrame:
     if not file_bytes:
         return pd.DataFrame()
     try:
-        xl = pd.ExcelFile(BytesIO(file_bytes))
+        xl = excel_file_safe(file_bytes)
         sheet = "FIRST" if "FIRST" in xl.sheet_names else xl.sheet_names[0]
-        df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet)
+        df = read_excel_safe(file_bytes, sheet_name=sheet)
         df.columns = [str(c).strip() for c in df.columns]
         col_ct = find_col(df, ["Nº CT", "N CT", "Contrato"], required=False)
         col_cliente = find_col(df, ["RAZÃO SOCIAL", "Razao Social", "Cliente"], required=False)
@@ -681,8 +718,7 @@ with aba1:
     st.markdown("<div class='section-title'>Radar Executivo</div>", unsafe_allow_html=True)
     st.markdown("""
     <div class="logic-box">
-    <b>Lógica atual:</b> locação não entra como consumo de estoque. O forecast de compra considera apenas venda/outros.
-    A locação aparece no módulo Parque Locação para medir recorrência, receita e possível expansão do parque.
+ 
     </div>
     """, unsafe_allow_html=True)
     radar = view.sort_values(["Score_Oportunidade", "Comprar_R$", "Excesso_Estoque_R$"], ascending=False)[cols_forecast].copy()
