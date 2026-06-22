@@ -1,24 +1,23 @@
 # FIRST Intelligence
 
-App Streamlit para forecast estratégico de estoque, compras e locação.
+Forecast estratégico de estoque, compras e locação.
 
-## Como usar
+## Como usar no Streamlit Cloud
 
-1. Coloque os arquivos fixos na pasta `dados`:
-   - `faturamento.xlsx`
-   - `estoque.xlsx`
-   - `contratos.xlsx` opcional
-2. Execute:
+Mantenha os arquivos padrão na pasta `dados`:
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+- `dados/faturamento.xlsx`
+- `dados/estoque.xlsx`
+- `dados/contratos.xlsx` opcional
 
-## Lógica principal
+O app usa esses arquivos automaticamente. Também é possível substituir as bases pela tela lateral com upload temporário.
 
-- Grupo oficial vem somente do estoque/MATR260.
-- Códigos com sufixos como `_RV`, `_TC`, `_AT` são cruzados por `Produto_Base`.
-- Locação não entra como consumo de estoque para compra.
-- Compras são sugeridas com base em venda/outros.
-- Locação vira módulo separado de recorrência e expansão de parque.
+## Ajustes da versão
+
+- Locação não entra como consumo de estoque.
+- Locação alimenta apenas a aba de inteligência de locação.
+- Grupo oficial vem do estoque/MATR260.
+- Valores monetários exibidos em formato brasileiro.
+- Legendas técnicas removidas das telas executivas.
+- Cobertura exibida em dias e meses.
+- Tratamento de códigos com sufixos como `_RV`, `_TC`, `_AT`.
