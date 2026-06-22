@@ -1,28 +1,24 @@
-# FIRST Intelligence
+# FIRST Intelligence - V10 Executivo
 
-Forecast estratégico de estoque, compras, locação e planejamento Microtech.
+## Como usar no Streamlit Cloud
 
-## Como usar
-
-1. Suba a pasta inteira no GitHub/Streamlit.
-2. Mantenha os arquivos padrão dentro de `/dados`:
+1. Mantenha os arquivos fixos no Git dentro da pasta `/dados`:
    - `faturamento.xlsx`
    - `estoque.xlsx`
-   - `microtech.xlsx` opcional
-   - `contratos.xlsx` opcional
-3. No app, marque **Usar arquivos fixos do Git/dados** para usar os arquivos base.
-4. Para atualizar o faturamento sem substituir a base, envie o **Faturamento Diário**. O app soma apenas linhas novas e ignora duplicidades.
+   - `microtech.xlsx` (opcional)
 
-## Destaques da versão V8
+2. O app continua lendo automaticamente as bases fixas do Git quando a opção **Usar bases fixas do Git** estiver marcada.
 
-- Forecast de estoque sem considerar locação recorrente como consumo.
-- Grupo oficial vindo do estoque/MATR260.
-- Tratamento de sufixos como `_RV`, `_TC`, `_AT`.
-- Análise por ARMZ e sugestão de transferência antes da compra.
-- Parque de locação por recorrência.
-- Planejamento Estratégico Microtech com:
-  - oportunidades por SKU;
-  - Rolling Forecast;
-  - compra x sell-out;
-  - crescimento por família;
-  - risco de importação.
+3. Os uploads substituem os arquivos apenas na sessão atual:
+   - Atualizar Faturamento Base
+   - Adicionar Faturamento Diário incremental
+   - Atualizar Estoque MATR260
+   - Atualizar Planejamento Microtech
+
+## Melhorias V10
+- Sidebar com visual executivo.
+- Remoção de metodologia e textos técnicos.
+- Mantida leitura das bases fixas no Git.
+- Cobertura média em meses e dias.
+- Resumo executivo adicional.
+- Visual mais próximo de dashboard corporativo.
