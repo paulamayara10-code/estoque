@@ -726,7 +726,7 @@ with st.sidebar:
     horizonte = st.number_input("Horizonte do forecast (dias)", min_value=7, max_value=180, value=30, step=1)
     dias_seguranca = st.number_input("Estoque de segurança (dias)", min_value=0, max_value=90, value=15, step=1)
     with st.expander("ℹ️ Metodologia", expanded=False):
-        st.write("Locação recorrente não entra como consumo de estoque. O faturamento diário é somado à base apenas quando não for duplicado.")
+    
 
 # Carregar bases fixas ou upload
 fat_bytes = fat_file.getvalue() if fat_file else (file_bytes_from_path(DADOS_DIR / "faturamento.xlsx") if usar_git else None)
