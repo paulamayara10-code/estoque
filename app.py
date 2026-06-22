@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 FIRST Intelligence | Forecast Estratégico de Estoque, Compras e Locação
-App Streamlit para cruzar MATR260 (estoque) + Relatório de Faturamento (guia Base).
+Cruza MATR260 (estoque) + Relatório de Faturamento (guia Base), com atualização diária incremental
+ e planejamento estratégico Microtech opcional.
 """
 
 from __future__ import annotations
@@ -20,13 +21,10 @@ import streamlit as st
 
 APP_NAME = "FIRST Intelligence"
 APP_SUBTITLE = "Forecast Estratégico de Estoque, Compras e Locação"
+BASE_DIR = Path(__file__).resolve().parent
+DADOS_DIR = BASE_DIR / "dados"
 
-st.set_page_config(
-    page_title=APP_NAME,
-    page_icon="📦",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title=APP_NAME, page_icon="📦", layout="wide", initial_sidebar_state="expanded")
 
 # =========================
 # ESTILO
@@ -51,7 +49,6 @@ st.markdown(
         .kpi-value {font-size: 25px; color: #071b35; font-weight: 800; line-height: 1.1;}
         .kpi-help {font-size: 12px; color: #7b8794; margin-top: 8px;}
         .section-title {font-size: 21px; font-weight: 800; color: #071b35; margin-top: 10px;}
-        div[data-testid="stMetricValue"] {font-size: 24px;}
         .small-note {font-size: 12px; color: #6b7280;}
     </style>
     """,
@@ -70,7 +67,7 @@ def norm_text(value: object) -> str:
 
 
 def normalize_code(value: object) -> str:
-    """Normaliza código preservando sufixos como _RV, _AT, _TC."""
+    """Normaliza código preservando sufixos relevantes e removendo variações simples."""
     if pd.isna(value):
         return ""
     text = str(value).strip().upper()
@@ -80,9 +77,16 @@ def normalize_code(value: object) -> str:
     return text
 
 
+def produto_base(value: object) -> str:
+    """Cria produto-base para unir variações como _RV, _TC, -AT, /RV, REV."""
+    text = normalize_code(value)
+    text = re.sub(r"([_\-\/\.])(RV|TC|AT|REV|R|V[0-9]+)$", "", text)
+    text = re.sub(r"(_RV|_TC|_AT|-RV|-TC|-AT|/RV|/TC|/AT)$", "", text)
+    return text
+
+
 def normalize_col(col: object) -> str:
     text = norm_text(col)
-    # remove acentos de forma simples
     repl = str.maketrans("ÁÀÂÃÉÊÍÓÔÕÚÇ", "AAAAEEIOOOUC")
     text = text.translate(repl)
     text = re.sub(r"[^A-Z0-9]+", "_", text).strip("_")
@@ -95,7 +99,6 @@ def find_col(df: pd.DataFrame, candidates: list[str], required: bool = True) -> 
         key = normalize_col(cand)
         if key in normalized:
             return normalized[key]
-    # tentativa por contém
     for cand in candidates:
         key = normalize_col(cand)
         for norm, original in normalized.items():
@@ -106,11 +109,17 @@ def find_col(df: pd.DataFrame, candidates: list[str], required: bool = True) -> 
     return None
 
 
-def brl(value: float) -> str:
+def brl(value: float, short: bool = False) -> str:
     try:
         value = float(value)
     except Exception:
         value = 0.0
+    if short:
+        abs_v = abs(value)
+        if abs_v >= 1_000_000:
+            return f"R$ {value/1_000_000:,.2f} MM".replace(",", "X").replace(".", ",").replace("X", ".")
+        if abs_v >= 1_000:
+            return f"R$ {value/1_000:,.1f} mil".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
@@ -135,56 +144,13 @@ def kpi_card(label: str, value: str, help_text: str = ""):
     )
 
 
-
-def fmt_int(value: float) -> str:
+def file_bytes_from_path(path: Path) -> Optional[bytes]:
     try:
-        if pd.isna(value) or np.isinf(value):
-            return "-"
-        return fmt_num(value, 0)
+        if path.exists() and path.suffix.lower() == ".xlsx":
+            return path.read_bytes()
     except Exception:
-        return "-"
-
-
-def fmt_float(value: float, casas: int = 1) -> str:
-    try:
-        if pd.isna(value) or np.isinf(value):
-            return "-"
-        return fmt_num(value, casas)
-    except Exception:
-        return "-"
-
-
-def formatar_tabela(df: pd.DataFrame) -> pd.DataFrame:
-    """Formata colunas para exibição executiva no padrão brasileiro."""
-    out = df.copy()
-    money_cols = [
-        "Valor_Estoque", "Valor Estoque", "Comprar_R$", "Comprar R$", "Receita_Total",
-        "Receita Total", "Receita_30d", "Receita_180d", "Receita_Locacao", "Receita Locação",
-        "Valor_ARMZ", "Valor Estoque ARMZ", "Valor", "Receita", "Capital_Parado"
-    ]
-    int_cols = [
-        "Estoque_Disponível", "Estoque Disponível", "Estoque_Total", "Estoque Total",
-        "Qtd_30d", "Qtd_180d", "Qtd_Total", "Qtd_Locacao", "Comprar_Qtd", "Comprar Qtd",
-        "Estoque_ARMZ", "Disponível_ARMZ", "Estoque_Disponivel", "Produtos", "Qtd_Sugerida",
-        "Qtde_ARMZ"
-    ]
-    decimal_cols = [
-        "Forecast_30d", "Forecast", "Estoque_Segurança", "Cobertura_Dias", "Cobertura Dias",
-        "Cobertura_ARMZ_Dias", "Consumo_Diário_Forecast", "Custo_Médio", "Índice_Pressão_Locação",
-        "Dias_Sem_Giro", "% Receita", "% Acumulado"
-    ]
-    date_cols = ["Última_Movimentação", "Data", "Última Movimentação"]
-
-    for col in out.columns:
-        if col in money_cols:
-            out[col] = out[col].apply(brl)
-        elif col in int_cols:
-            out[col] = out[col].apply(fmt_int)
-        elif col in decimal_cols:
-            out[col] = out[col].apply(lambda x: fmt_float(x, 1))
-        elif col in date_cols:
-            out[col] = pd.to_datetime(out[col], errors="coerce").dt.strftime("%d/%m/%Y").fillna("")
-    return out
+        return None
+    return None
 
 
 def to_excel_download(sheets: dict[str, pd.DataFrame]) -> bytes:
@@ -195,16 +161,32 @@ def to_excel_download(sheets: dict[str, pd.DataFrame]) -> bytes:
             df.to_excel(writer, index=False, sheet_name=safe_name)
             ws = writer.sheets[safe_name]
             for col_idx, col_name in enumerate(df.columns, start=1):
-                width = min(max(len(str(col_name)) + 2, 12), 35)
+                width = min(max(len(str(col_name)) + 2, 12), 36)
                 ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
     return output.getvalue()
 
+
+def money_cols_config(cols: list[str]) -> dict:
+    cfg = {}
+    for c in cols:
+        n = normalize_col(c)
+        if any(k in n for k in ["VALOR", "RECEITA", "COMPRAR_R", "CAPITAL", "CUSTO"]):
+            cfg[c] = st.column_config.NumberColumn(c.replace("_", " "), format="R$ %.2f")
+        elif any(k in n for k in ["COBERTURA", "FORECAST", "CONSUMO", "INDICE", "SCORE"]):
+            cfg[c] = st.column_config.NumberColumn(c.replace("_", " "), format="%.1f")
+        elif any(k in n for k in ["QTD", "QUANTIDADE", "ESTOQUE", "SALDO", "DISPONIVEL", "DISPONIVEL"]):
+            cfg[c] = st.column_config.NumberColumn(c.replace("_", " "), format="%.0f")
+    return cfg
+
+
+def df_view(df: pd.DataFrame, **kwargs):
+    st.dataframe(df, use_container_width=True, hide_index=True, column_config=money_cols_config(list(df.columns)), **kwargs)
 
 # =========================
 # LEITURA E TRATAMENTO
 # =========================
 @st.cache_data(show_spinner=False)
-def load_faturamento(file_bytes: bytes, sheet_name: str = "Base") -> pd.DataFrame:
+def load_faturamento(file_bytes: bytes, sheet_name: str = "Base", origem: str = "Base") -> pd.DataFrame:
     df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -219,25 +201,29 @@ def load_faturamento(file_bytes: bytes, sheet_name: str = "Base") -> pd.DataFram
     col_class = find_col(df, ["CLASSIFICAÇÃO", "Classificacao"], required=False)
     col_finalidade = find_col(df, ["FINALIDADE", "Finalidade"], required=False)
     col_categoria = find_col(df, ["CATEGORIA", "Categoria"], required=False)
+    col_cliente = find_col(df, ["CLIENTE", "Cliente", "Nome Cliente", "Razao Social", "Razão Social"], required=False)
+    col_nf = find_col(df, ["Nota Fiscal", "Nota", "NF", "Num NF", "Nro Nota"], required=False)
 
     out = pd.DataFrame()
-    out["Produto"] = df[col_produto].map(normalize_code)
+    out["Produto_Original"] = df[col_produto].map(normalize_code)
+    out["Produto"] = out["Produto_Original"].map(produto_base)
     out["Descrição"] = df[col_desc].fillna("").astype(str).str.strip() if col_desc else ""
     out["Data"] = pd.to_datetime(df[col_data], errors="coerce", dayfirst=True)
     out["Quantidade"] = pd.to_numeric(df[col_qtd], errors="coerce").fillna(0)
     out["Valor"] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0) if col_valor else 0
-    out["Grupo"] = df[col_grupo].fillna("").astype(str).str.strip() if col_grupo else ""
+    out["Grupo_Faturamento"] = df[col_grupo].fillna("").astype(str).str.strip() if col_grupo else ""
     out["Linha"] = df[col_linha].fillna("").astype(str).str.strip() if col_linha else ""
     out["Nova"] = df[col_nova].fillna("").astype(str).str.strip() if col_nova else ""
     out["Classificação"] = df[col_class].fillna("").astype(str).str.strip() if col_class else ""
     out["Finalidade"] = df[col_finalidade].fillna("").astype(str).str.strip() if col_finalidade else ""
     out["Categoria"] = df[col_categoria].fillna("").astype(str).str.strip() if col_categoria else ""
+    out["Cliente"] = df[col_cliente].fillna("").astype(str).str.strip() if col_cliente else ""
+    out["Nota"] = df[col_nf].fillna("").astype(str).str.strip() if col_nf else ""
+    out["Origem"] = origem
 
     texto_loc = (
-        out["Nova"].map(norm_text) + " " +
-        out["Classificação"].map(norm_text) + " " +
-        out["Finalidade"].map(norm_text) + " " +
-        out["Categoria"].map(norm_text)
+        out["Nova"].map(norm_text) + " " + out["Classificação"].map(norm_text) + " " +
+        out["Finalidade"].map(norm_text) + " " + out["Categoria"].map(norm_text)
     )
     out["Tipo Operação"] = np.where(texto_loc.str.contains("LOCACAO|LOCAÇÃO", regex=True), "Locação", "Venda/Outros")
     out = out[(out["Produto"] != "") & out["Data"].notna()].copy()
@@ -268,13 +254,13 @@ def load_estoque(file_bytes: bytes, sheet_name: Optional[str] = None) -> pd.Data
     col_disp = find_col(df, ["ESTOQUE DISPONIVEL", "Disponivel", "Disponível"], required=False)
     col_valor = find_col(df, ["VALOR EM ESTOQUE", "Valor Estoque", "Valor"], required=False)
 
-    # O MATR260 pode deixar CODIGO/DESCRICAO em branco nas linhas seguintes do mesmo produto por ARMZ.
     for col in [col_codigo, col_desc, col_grupo]:
         if col:
             df[col] = df[col].ffill()
 
     out = pd.DataFrame()
-    out["Produto"] = df[col_codigo].map(normalize_code)
+    out["Produto_Original"] = df[col_codigo].map(normalize_code)
+    out["Produto"] = out["Produto_Original"].map(produto_base)
     out["Descrição Estoque"] = df[col_desc].fillna("").astype(str).str.strip() if col_desc else ""
     out["Grupo Estoque"] = df[col_grupo].fillna("").astype(str).str.strip() if col_grupo else ""
     out["ARMZ"] = df[col_armz].fillna("").astype(str).str.strip()
@@ -289,71 +275,129 @@ def load_estoque(file_bytes: bytes, sheet_name: Optional[str] = None) -> pd.Data
     return out
 
 
-def build_forecast(
-    estoque: pd.DataFrame,
-    faturamento: pd.DataFrame,
-    horizonte: int = 30,
-    dias_seguranca: int = 15,
-    usar_tipo: str = "Todos",
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def combinar_faturamentos(base: pd.DataFrame, diarios: list[pd.DataFrame]) -> tuple[pd.DataFrame, int, int]:
+    if not diarios:
+        return base.copy(), 0, 0
+    base2 = base.copy()
+    daily = pd.concat(diarios, ignore_index=True) if diarios else pd.DataFrame()
+    before = len(base2) + len(daily)
+    all_df = pd.concat([base2, daily], ignore_index=True)
+    # Deduplica priorizando a base original. Quando existir nota, ela pesa na chave; quando não existir, cai para data/produto/cliente/qtd/valor.
+    all_df["__nota_key"] = all_df["Nota"].astype(str).str.strip().replace({"nan": "", "None": ""})
+    all_df["__valor_key"] = all_df["Valor"].round(2)
+    all_df["__qtd_key"] = all_df["Quantidade"].round(4)
+    all_df["__data_key"] = all_df["Data"].dt.strftime("%Y-%m-%d")
+    key_with_nf = np.where(all_df["__nota_key"].ne(""), all_df["__nota_key"], "SEMNF")
+    all_df["__key"] = (
+        key_with_nf.astype(str) + "|" + all_df["__data_key"].astype(str) + "|" + all_df["Produto"].astype(str) + "|" +
+        all_df["Cliente"].map(norm_text).astype(str) + "|" + all_df["__qtd_key"].astype(str) + "|" + all_df["__valor_key"].astype(str)
+    )
+    all_df["__prioridade"] = np.where(all_df["Origem"].eq("Base"), 0, 1)
+    all_df = all_df.sort_values("__prioridade").drop_duplicates("__key", keep="first")
+    adicionadas = int((all_df["Origem"].ne("Base")).sum())
+    duplicadas = int(before - len(all_df))
+    all_df = all_df.drop(columns=[c for c in all_df.columns if c.startswith("__")])
+    return all_df, adicionadas, duplicadas
+
+
+@st.cache_data(show_spinner=False)
+def load_microtech(file_bytes: bytes) -> dict[str, pd.DataFrame]:
+    xl = pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
+    out = {}
+    for sheet in xl.sheet_names:
+        try:
+            df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet, engine="openpyxl")
+            df.columns = [str(c).strip() for c in df.columns]
+            out[sheet] = df.dropna(how="all")
+        except Exception:
+            continue
+    return out
+
+
+def summarize_microtech(book: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # Procura uma aba com cara de rolling forecast; se não achar, usa a primeira que possua SKU/produto e colunas numéricas.
+    ordered = sorted(book.items(), key=lambda kv: ("ROLLING" not in normalize_col(kv[0]), "FORECAST" not in normalize_col(kv[0])))
+    summaries = []
+    sheet_summary = []
+    for sheet, df in ordered:
+        if df.empty:
+            continue
+        sku_col = find_col(df, ["SKU", "Item", "Produto", "Code", "Código", "Codigo", "Part Number"], required=False)
+        fam_col = find_col(df, ["Family", "Familia", "Família", "Linha", "Grupo"], required=False)
+        numeric_cols = [c for c in df.columns if c != sku_col and pd.to_numeric(df[c], errors="coerce").notna().sum() >= max(3, len(df) * 0.10)]
+        sheet_summary.append({"Aba": sheet, "Linhas": len(df), "Colunas Numéricas": len(numeric_cols), "Coluna SKU": sku_col or ""})
+        if sku_col and numeric_cols:
+            tmp = df[[sku_col] + ([fam_col] if fam_col else []) + numeric_cols].copy()
+            tmp[sku_col] = tmp[sku_col].map(normalize_code)
+            tmp = tmp[tmp[sku_col].ne("")]
+            for c in numeric_cols:
+                tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0)
+            tmp["Total Planejado"] = tmp[numeric_cols].sum(axis=1)
+            tmp["Média por Período"] = tmp[numeric_cols].mean(axis=1)
+            tmp["Aba Origem"] = sheet
+            tmp = tmp.rename(columns={sku_col: "SKU"})
+            if fam_col:
+                tmp = tmp.rename(columns={fam_col: "Família"})
+            else:
+                tmp["Família"] = ""
+            summaries.append(tmp[["SKU", "Família", "Total Planejado", "Média por Período", "Aba Origem"]])
+            # usa a primeira aba forte como resumo principal
+            if "ROLLING" in normalize_col(sheet) or "FORECAST" in normalize_col(sheet):
+                break
+    if summaries:
+        final = pd.concat(summaries, ignore_index=True)
+        final = final.groupby(["SKU", "Família"], as_index=False).agg(
+            Total_Planejado=("Total Planejado", "sum"),
+            Media_Periodo=("Média por Período", "mean"),
+            Aba_Origem=("Aba Origem", "first"),
+        ).sort_values("Total_Planejado", ascending=False)
+    else:
+        final = pd.DataFrame(columns=["SKU", "Família", "Total_Planejado", "Media_Periodo", "Aba_Origem"])
+    return final, pd.DataFrame(sheet_summary)
+
+
+def build_forecast(estoque: pd.DataFrame, faturamento: pd.DataFrame, horizonte: int = 30, dias_seguranca: int = 15):
     fat_all = faturamento.copy()
-    fat = fat_all[~fat_all["Tipo Operação"].eq("Locação")].copy()
-    # Locação é analisada como parque/recorrência, mas não entra como consumo de estoque.
-    if usar_tipo != "Todos":
-        fat = fat[fat["Tipo Operação"].eq(usar_tipo)].copy()
+    fat_consumo = fat_all[~fat_all["Tipo Operação"].eq("Locação")].copy()
 
     data_ref = fat_all["Data"].max() if not fat_all.empty else pd.Timestamp.today().normalize()
     inicio_30 = data_ref - pd.Timedelta(days=30)
     inicio_180 = data_ref - pd.Timedelta(days=180)
-    inicio_90 = data_ref - pd.Timedelta(days=90)
 
-    fat_30 = fat[fat["Data"] > inicio_30]
-    fat_180 = fat[fat["Data"] > inicio_180]
-    fat_90 = fat[fat["Data"] > inicio_90]
+    fat_30 = fat_consumo[fat_consumo["Data"] > inicio_30]
+    fat_180 = fat_consumo[fat_consumo["Data"] > inicio_180]
 
     consumo_30 = fat_30.groupby("Produto", as_index=False).agg(Qtd_30d=("Quantidade", "sum"), Receita_30d=("Valor", "sum"))
     consumo_180 = fat_180.groupby("Produto", as_index=False).agg(Qtd_180d=("Quantidade", "sum"), Receita_180d=("Valor", "sum"))
-    ultimo_mov = fat.groupby("Produto", as_index=False).agg(
-        Última_Movimentação=("Data", "max"),
-        Receita_Total=("Valor", "sum"),
-        Qtd_Total=("Quantidade", "sum"),
+    ultimo_mov = fat_consumo.groupby("Produto", as_index=False).agg(
+        Última_Movimentação=("Data", "max"), Receita_Consumo=("Valor", "sum"), Qtd_Total=("Quantidade", "sum")
     )
-    cad = fat.sort_values("Data").groupby("Produto", as_index=False).agg(
-        Descrição_Faturamento=("Descrição", "last"),
-        Grupo=("Grupo", "last"),
-        Linha=("Linha", "last"),
+    receita_total = fat_all.groupby("Produto", as_index=False).agg(Receita_Total=("Valor", "sum"))
+    cad = fat_all.sort_values("Data").groupby("Produto", as_index=False).agg(
+        Descrição_Faturamento=("Descrição", "last"), Linha=("Linha", "last"), Grupo_Faturamento=("Grupo_Faturamento", "last")
     )
     loc = fat_all[fat_all["Tipo Operação"].eq("Locação")].groupby("Produto", as_index=False).agg(
-        Qtd_Locacao=("Quantidade", "sum"),
-        Receita_Locacao=("Valor", "sum"),
+        Qtd_Locacao=("Quantidade", "sum"), Receita_Locacao=("Valor", "sum"), Clientes_Locacao=("Cliente", "nunique")
     )
 
     est_total = estoque.groupby("Produto", as_index=False).agg(
-        Descrição_Estoque=("Descrição Estoque", "first"),
-        Grupo_Estoque=("Grupo Estoque", "first"),
-        Estoque_Total=("Saldo Estoque", "sum"),
-        Estoque_Disponível=("Estoque Disponível", "sum"),
-        Valor_Estoque=("Valor Estoque", "sum"),
-        Qtde_ARMZ=("ARMZ", "nunique"),
+        Descrição_Estoque=("Descrição Estoque", "first"), Grupo_Estoque=("Grupo Estoque", "first"),
+        Estoque_Total=("Saldo Estoque", "sum"), Estoque_Disponível=("Estoque Disponível", "sum"),
+        Valor_Estoque=("Valor Estoque", "sum"), Qtde_ARMZ=("ARMZ", "nunique")
     )
 
-    base = est_total.merge(cad, on="Produto", how="left")
-    base = base.merge(consumo_30, on="Produto", how="left")
-    base = base.merge(consumo_180, on="Produto", how="left")
-    base = base.merge(ultimo_mov, on="Produto", how="left")
-    base = base.merge(loc, on="Produto", how="left")
+    base = est_total.merge(cad, on="Produto", how="left").merge(consumo_30, on="Produto", how="left").merge(consumo_180, on="Produto", how="left")
+    base = base.merge(ultimo_mov, on="Produto", how="left").merge(receita_total, on="Produto", how="left").merge(loc, on="Produto", how="left")
 
-    for c in ["Qtd_30d", "Receita_30d", "Qtd_180d", "Receita_180d", "Receita_Total", "Qtd_Total", "Qtd_Locacao", "Receita_Locacao"]:
+    for c in ["Qtd_30d", "Receita_30d", "Qtd_180d", "Receita_180d", "Receita_Total", "Receita_Consumo", "Qtd_Total", "Qtd_Locacao", "Receita_Locacao", "Clientes_Locacao"]:
         base[c] = pd.to_numeric(base[c], errors="coerce").fillna(0)
 
     base["Descrição"] = base["Descrição_Faturamento"].fillna(base["Descrição_Estoque"]).fillna("")
-    base["Grupo_Faturamento"] = base["Grupo"].fillna("")
-    base["Grupo"] = base["Grupo_Estoque"].fillna("")
+    base["Grupo"] = base["Grupo_Estoque"].fillna("").astype(str).str.strip()
     base["Linha"] = base["Linha"].fillna("")
 
     base["Consumo_Diário_30d"] = base["Qtd_30d"] / 30
     base["Consumo_Diário_180d"] = base["Qtd_180d"] / 180
-    # Inteligência: 70% recente + 30% histórico. Se não teve 30d, usa histórico.
     base["Consumo_Diário_Forecast"] = np.where(
         base["Qtd_30d"] > 0,
         (base["Consumo_Diário_30d"] * 0.70) + (base["Consumo_Diário_180d"] * 0.30),
@@ -361,23 +405,15 @@ def build_forecast(
     )
     base["Forecast_30d"] = base["Consumo_Diário_Forecast"] * horizonte
     base["Estoque_Segurança"] = base["Consumo_Diário_Forecast"] * dias_seguranca
-    base["Cobertura_Dias"] = np.where(
-        base["Consumo_Diário_Forecast"] > 0,
-        base["Estoque_Disponível"] / base["Consumo_Diário_Forecast"],
-        np.inf,
-    )
+    base["Cobertura_Dias"] = np.where(base["Consumo_Diário_Forecast"] > 0, base["Estoque_Disponível"] / base["Consumo_Diário_Forecast"], np.inf)
     base["Cobertura_Meses"] = base["Cobertura_Dias"] / 30
-    base["Cobertura"] = base["Cobertura_Dias"].apply(lambda x: "-" if pd.isna(x) or np.isinf(x) else f"{x:.0f} dias ({x/30:.1f}m)")
     base["Excesso_Estoque"] = (base["Estoque_Disponível"] - (base["Forecast_30d"] + base["Estoque_Segurança"])).clip(lower=0)
     base["Necessidade_Bruta"] = base["Forecast_30d"] + base["Estoque_Segurança"] - base["Estoque_Disponível"]
     base["Comprar_Qtd"] = np.ceil(base["Necessidade_Bruta"].clip(lower=0)).astype(int)
     base["Custo_Médio"] = np.where(base["Estoque_Disponível"] > 0, base["Valor_Estoque"] / base["Estoque_Disponível"], 0)
     base["Comprar_R$"] = base["Comprar_Qtd"] * base["Custo_Médio"]
-    base["Dias_Sem_Giro"] = np.where(
-        base["Última_Movimentação"].notna(),
-        (data_ref - base["Última_Movimentação"]).dt.days,
-        np.nan,
-    )
+    base["Excesso_R$"] = base["Excesso_Estoque"] * base["Custo_Médio"]
+    base["Dias_Sem_Giro"] = np.where(base["Última_Movimentação"].notna(), (data_ref - base["Última_Movimentação"]).dt.days, np.nan)
 
     def status(row):
         if row["Consumo_Diário_Forecast"] <= 0:
@@ -392,45 +428,29 @@ def build_forecast(
 
     base["Status"] = base.apply(status, axis=1)
     base["Ação"] = np.select(
-        [base["Comprar_Qtd"] > 0, base["Status"].eq("⚫ Sem Giro") & (base["Valor_Estoque"] > 0)],
-        ["Comprar", "Avaliar capital parado"],
+        [base["Comprar_Qtd"] > 0, base["Status"].eq("⚫ Sem Giro") & (base["Valor_Estoque"] > 0), base["Excesso_Estoque"] > base["Forecast_30d"] * 3],
+        ["Comprar", "Avaliar capital parado", "Avaliar excesso"],
         default="Manter",
     )
     base["Score_Oportunidade"] = (
-        np.where(base["Status"].eq("🔴 Crítico"), 45, 0)
-        + np.where(base["Status"].eq("🟠 Atenção"), 25, 0)
-        + np.where(base["Comprar_Qtd"] > 0, 25, 0)
-        + np.where(base["Receita_Locacao"] > 0, 15, 0)
-        + np.where(base["Receita_Total"] > base["Receita_Total"].quantile(0.80), 15, 0)
+        np.where(base["Status"].eq("🔴 Crítico"), 45, 0) + np.where(base["Status"].eq("🟠 Atenção"), 25, 0) +
+        np.where(base["Comprar_Qtd"] > 0, 25, 0) + np.where(base["Receita_Locacao"] > 0, 10, 0) +
+        np.where(base["Receita_Total"] > base["Receita_Total"].quantile(0.80), 15, 0)
     ).clip(0, 100)
 
-    # Curva ABC por receita
-    abc = base[["Produto", "Descrição", "Receita_Total", "Qtd_Total", "Valor_Estoque"]].copy()
-    abc = abc.sort_values("Receita_Total", ascending=False)
+    abc = base[["Produto", "Descrição", "Receita_Total", "Qtd_Total", "Valor_Estoque"]].copy().sort_values("Receita_Total", ascending=False)
     total_receita = abc["Receita_Total"].sum()
     abc["% Receita"] = np.where(total_receita > 0, abc["Receita_Total"] / total_receita, 0)
     abc["% Acumulado"] = abc["% Receita"].cumsum()
-    abc["Classe ABC"] = np.select(
-        [abc["% Acumulado"] <= 0.80, abc["% Acumulado"] <= 0.95],
-        ["A", "B"],
-        default="C",
-    )
-    base = base.merge(abc[["Produto", "Classe ABC"]], on="Produto", how="left")
+    abc["Classe ABC Receita"] = np.select([abc["% Acumulado"] <= 0.80, abc["% Acumulado"] <= 0.95], ["A", "B"], default="C")
+    base = base.merge(abc[["Produto", "Classe ABC Receita"]], on="Produto", how="left")
 
-    # Estoque por ARMZ com distribuição referencial da demanda entre armazéns com saldo.
     armz = estoque.groupby(["Produto", "ARMZ"], as_index=False).agg(
-        Estoque_ARMZ=("Saldo Estoque", "sum"),
-        Disponível_ARMZ=("Estoque Disponível", "sum"),
-        Valor_ARMZ=("Valor Estoque", "sum"),
+        Estoque_ARMZ=("Saldo Estoque", "sum"), Disponível_ARMZ=("Estoque Disponível", "sum"), Valor_ARMZ=("Valor Estoque", "sum")
     )
     armz = armz.merge(base[["Produto", "Descrição", "Grupo", "Linha", "Consumo_Diário_Forecast", "Forecast_30d", "Estoque_Segurança", "Status"]], on="Produto", how="left")
-    armz["Cobertura_ARMZ_Dias"] = np.where(
-        armz["Consumo_Diário_Forecast"].fillna(0) > 0,
-        armz["Disponível_ARMZ"] / armz["Consumo_Diário_Forecast"],
-        np.inf,
-    )
+    armz["Cobertura_ARMZ_Dias"] = np.where(armz["Consumo_Diário_Forecast"].fillna(0) > 0, armz["Disponível_ARMZ"] / armz["Consumo_Diário_Forecast"], np.inf)
 
-    # Sugestão de transferência: quando consolidado não precisa comprar, mas existe ARMZ zerado/baixo e outro com sobra.
     transfer_rows = []
     base_no_buy = base[base["Comprar_Qtd"].eq(0) & (base["Consumo_Diário_Forecast"] > 0)]
     for _, prod in base_no_buy.iterrows():
@@ -443,79 +463,104 @@ def build_forecast(
         sobra = part[part["Disponível_ARMZ"] > demanda_ref_armz].sort_values("Disponível_ARMZ", ascending=False)
         if deficit.empty or sobra.empty:
             continue
-        origem = sobra.iloc[0]
-        destino = deficit.iloc[0]
+        origem, destino = sobra.iloc[0], deficit.iloc[0]
         qtd = int(min(origem["Disponível_ARMZ"] - demanda_ref_armz, demanda_ref_armz - destino["Disponível_ARMZ"]))
         if qtd > 0:
-            transfer_rows.append({
-                "Produto": p,
-                "Descrição": prod["Descrição"],
-                "Origem_ARMZ": origem["ARMZ"],
-                "Destino_ARMZ": destino["ARMZ"],
-                "Qtd_Sugerida": qtd,
-                "Motivo": "Redistribuir estoque antes de comprar",
-            })
+            transfer_rows.append({"Produto": p, "Descrição": prod["Descrição"], "Origem_ARMZ": origem["ARMZ"], "Destino_ARMZ": destino["ARMZ"], "Qtd_Sugerida": qtd, "Motivo": "Redistribuir estoque antes de comprar"})
     transfer = pd.DataFrame(transfer_rows)
 
-    # Locação
-    locacao = base[base["Receita_Locacao"] > 0].copy()
-    locacao["Índice_Pressão_Locação"] = np.where(
-        locacao["Estoque_Disponível"] > 0,
-        locacao["Qtd_Locacao"] / locacao["Estoque_Disponível"],
-        locacao["Qtd_Locacao"],
+    locacao = build_locacao_recorrencia(fat_all, base)
+    return base, armz, transfer, locacao, data_ref
+
+
+def max_consecutive_months(periods: list[pd.Period]) -> int:
+    if not periods:
+        return 0
+    ords = sorted(set([p.ordinal for p in periods]))
+    best = cur = 1
+    for i in range(1, len(ords)):
+        if ords[i] == ords[i - 1] + 1:
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 1
+    return best
+
+
+def build_locacao_recorrencia(fat_all: pd.DataFrame, base: pd.DataFrame) -> pd.DataFrame:
+    loc = fat_all[fat_all["Tipo Operação"].eq("Locação")].copy()
+    if loc.empty:
+        return pd.DataFrame()
+    loc["Mes"] = loc["Data"].dt.to_period("M")
+    grouped = loc.groupby(["Produto", "Cliente"], as_index=False).agg(
+        Receita_Locacao=("Valor", "sum"), Qtd_Locacao=("Quantidade", "sum"), Meses_Faturados=("Mes", "nunique"),
+        Primeiro_Faturamento=("Data", "min"), Ultimo_Faturamento=("Data", "max")
     )
-    locacao = locacao.sort_values(["Índice_Pressão_Locação", "Receita_Locacao"], ascending=False)
-
-    return base, armz, transfer, locacao
-
+    seq = loc.groupby(["Produto", "Cliente"])["Mes"].apply(lambda s: max_consecutive_months(list(s))).reset_index(name="Meses_Consecutivos")
+    grouped = grouped.merge(seq, on=["Produto", "Cliente"], how="left")
+    grouped["Score_Recorrência"] = np.select(
+        [grouped["Meses_Consecutivos"] >= 12, grouped["Meses_Consecutivos"] >= 6, grouped["Meses_Consecutivos"] >= 3, grouped["Meses_Consecutivos"] >= 2, grouped["Meses_Consecutivos"] >= 1],
+        [100, 80, 60, 40, 20], default=0
+    )
+    produto = grouped.groupby("Produto", as_index=False).agg(
+        Clientes_Ativos_Estimados=("Cliente", "nunique"), Receita_Locacao=("Receita_Locacao", "sum"), Qtd_Locacao=("Qtd_Locacao", "sum"),
+        Score_Recorrência=("Score_Recorrência", "max"), Meses_Consecutivos_Max=("Meses_Consecutivos", "max"),
+        Meses_Faturados_Total=("Meses_Faturados", "sum"), Ultimo_Faturamento=("Ultimo_Faturamento", "max")
+    )
+    produto = produto.merge(base[["Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Valor_Estoque", "Status", "Comprar_Qtd"]], on="Produto", how="left")
+    produto["Índice_Ocupação_Estimado"] = np.where(produto["Estoque_Disponível"].fillna(0) > 0, produto["Clientes_Ativos_Estimados"] / produto["Estoque_Disponível"], np.nan)
+    produto["Sinal_Investimento"] = np.select(
+        [(produto["Score_Recorrência"] >= 80) & (produto["Índice_Ocupação_Estimado"].fillna(0) >= 0.80), produto["Score_Recorrência"] >= 60],
+        ["🔵 Avaliar expansão", "🟢 Locação recorrente"], default="Monitorar"
+    )
+    return produto.sort_values(["Score_Recorrência", "Receita_Locacao"], ascending=False)
 
 # =========================
 # INTERFACE
 # =========================
-st.markdown(
-    f"""
-    <div class="first-header">
-        <h1>{APP_NAME}</h1>
-        <p>{APP_SUBTITLE}</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown(f"""<div class="first-header"><h1>{APP_NAME}</h1><p>{APP_SUBTITLE}</p></div>""", unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown("### 📁 Bases")
-    fat_file = st.file_uploader("Relatório de Faturamento 2026", type=["xlsx"], help="Usar a guia Base")
-    est_file = st.file_uploader("Relatório de Estoque MATR260", type=["xlsx"], help="Relatório com coluna ARMZ")
+    usar_git = st.checkbox("Usar arquivos fixos do Git/dados", value=True)
+    fat_file = st.file_uploader("Substituir Faturamento Base", type=["xlsx"], help="Opcional. Se não enviar, usa /dados/faturamento.xlsx")
+    diarios_files = st.file_uploader("Adicionar Faturamento Diário", type=["xlsx"], accept_multiple_files=True, help="Somente linhas novas serão somadas; duplicidades serão ignoradas.")
+    est_file = st.file_uploader("Substituir Estoque MATR260", type=["xlsx"], help="Opcional. Se não enviar, usa /dados/estoque.xlsx")
+    micro_file = st.file_uploader("Planejamento Microtech", type=["xlsx"], help="Opcional. Se não enviar, tenta usar /dados/microtech.xlsx")
 
     st.markdown("### ⚙️ Parâmetros")
     horizonte = st.number_input("Horizonte do forecast (dias)", min_value=7, max_value=180, value=30, step=1)
     dias_seguranca = st.number_input("Estoque de segurança (dias)", min_value=0, max_value=90, value=15, step=1)
-    tipo_operacao = st.selectbox("Base de consumo", ["Todos", "Venda/Outros"], index=0)
+    with st.expander("ℹ️ Metodologia", expanded=False):
+        st.write("Locação recorrente não entra como consumo de estoque. O faturamento diário é somado à base apenas quando não for duplicado.")
 
-BASE_DIR = Path(__file__).parent
-DADOS_DIR = BASE_DIR / "dados"
-fat_path = DADOS_DIR / "faturamento.xlsx"
-est_path = DADOS_DIR / "estoque.xlsx"
+# Carregar bases fixas ou upload
+fat_bytes = fat_file.getvalue() if fat_file else (file_bytes_from_path(DADOS_DIR / "faturamento.xlsx") if usar_git else None)
+est_bytes = est_file.getvalue() if est_file else (file_bytes_from_path(DADOS_DIR / "estoque.xlsx") if usar_git else None)
+micro_bytes = micro_file.getvalue() if micro_file else (file_bytes_from_path(DADOS_DIR / "microtech.xlsx") if usar_git else None)
 
-if not fat_file and not fat_path.exists():
-    st.info("Envie o **Relatório de Faturamento** ou mantenha o arquivo padrão em dados/faturamento.xlsx.")
-    st.stop()
-if not est_file and not est_path.exists():
-    st.info("Envie o **MATR260 de Estoque** ou mantenha o arquivo padrão em dados/estoque.xlsx.")
+if not fat_bytes or not est_bytes:
+    st.info("Envie o **Relatório de Faturamento** e o **MATR260 de Estoque**, ou mantenha os arquivos em `/dados` no Git.")
     st.stop()
 
 try:
-    fat_bytes = fat_file.getvalue() if fat_file else fat_path.read_bytes()
-    est_bytes = est_file.getvalue() if est_file else est_path.read_bytes()
-    faturamento = load_faturamento(fat_bytes, "Base")
+    faturamento_base = load_faturamento(fat_bytes, "Base", origem="Base")
+    diarios = []
+    for idx, f in enumerate(diarios_files or [], start=1):
+        diarios.append(load_faturamento(f.getvalue(), "Base", origem=f"Diário {idx}"))
+    faturamento, linhas_diarias_adicionadas, linhas_duplicadas = combinar_faturamentos(faturamento_base, diarios)
     estoque = load_estoque(est_bytes)
-    forecast, armz, transferencias, locacao = build_forecast(
-        estoque, faturamento, horizonte=int(horizonte), dias_seguranca=int(dias_seguranca), usar_tipo=tipo_operacao
-    )
+    forecast, armz, transferencias, locacao, data_ref = build_forecast(estoque, faturamento, horizonte=int(horizonte), dias_seguranca=int(dias_seguranca))
 except Exception as e:
     st.error("Não consegui processar os arquivos. Verifique se os relatórios estão no layout esperado.")
     st.exception(e)
     st.stop()
+
+# Indicador discreto de atualização
+base_info = f"Base: {len(faturamento_base):,} linhas".replace(",", ".")
+if diarios_files:
+    base_info += f" | Diário adicionado: {linhas_diarias_adicionadas:,} | Duplicidades ignoradas: {linhas_duplicadas:,}".replace(",", ".")
+st.caption(f"Data de referência: {data_ref.strftime('%d/%m/%Y')} | {base_info}")
 
 # Filtros globais
 with st.expander("🔎 Filtros", expanded=True):
@@ -553,7 +598,6 @@ armz_view = armz[armz["Produto"].isin(view["Produto"])]
 if filtro_armz:
     armz_view = armz_view[armz_view["ARMZ"].isin(filtro_armz)]
 
-# KPIs
 criticos = int(view["Status"].eq("🔴 Crítico").sum())
 sem_giro = int(view["Status"].eq("⚫ Sem Giro").sum())
 compras = view[view["Comprar_Qtd"] > 0]
@@ -563,50 +607,27 @@ transf_count = len(transferencias[transferencias["Produto"].isin(view["Produto"]
 cobertura_media = view.replace([np.inf, -np.inf], np.nan)["Cobertura_Dias"].mean()
 
 k1, k2, k3, k4 = st.columns(4)
-with k1:
-    kpi_card("Valor Total em Estoque", brl(valor_estoque), "Base MATR260")
-with k2:
-    kpi_card("Produtos Críticos", fmt_num(criticos), "Cobertura até 15 dias")
-with k3:
-    kpi_card("Compras Recomendadas", brl(compras["Comprar_R$"].sum()), f"{len(compras)} produtos")
-with k4:
-    kpi_card("Capital Parado", brl(capital_parado), f"{sem_giro} produtos sem giro")
+with k1: kpi_card("Valor Total em Estoque", brl(valor_estoque, short=True), "MATR260")
+with k2: kpi_card("Produtos Críticos", fmt_num(criticos), "Cobertura até 15 dias")
+with k3: kpi_card("Compras Recomendadas", brl(compras["Comprar_R$"].sum(), short=True), f"{len(compras)} produtos")
+with k4: kpi_card("Capital Parado", brl(capital_parado, short=True), f"{sem_giro} produtos sem giro")
 
 k5, k6, k7, k8 = st.columns(4)
-with k5:
-    kpi_card("Transferências", fmt_num(transf_count), "Sugestões entre ARMZ")
-with k6:
-    kpi_card("Cobertura Média", f"{fmt_num(cobertura_media, 1)} dias" if not np.isnan(cobertura_media) else "-", "Somente itens com consumo")
-with k7:
-    kpi_card("Receita Locação", brl(view["Receita_Locacao"].sum()), "Itens com histórico de locação")
-with k8:
-    kpi_card("Produtos Analisados", fmt_num(len(view)), "Após filtros aplicados")
+with k5: kpi_card("Transferências", fmt_num(transf_count), "Sugestões entre ARMZ")
+with k6: kpi_card("Cobertura Média", f"{fmt_num(cobertura_media, 1)} dias" if not np.isnan(cobertura_media) else "-", "Itens com consumo")
+with k7: kpi_card("Receita Locação", brl(view["Receita_Locacao"].sum(), short=True), "Não gera compra automática")
+with k8: kpi_card("Produtos Analisados", fmt_num(len(view)), "Após filtros")
 
-# Abas
-aba1, aba2, aba3, aba4, aba5, aba6, aba7, aba8 = st.tabs([
-    "🏠 Radar Executivo",
-    "📈 Forecast",
-    "🛒 Compras",
-    "🔄 Transferências",
-    "📦 Capital Parado",
-    "🎯 Curva ABC",
-    "🏥 Locação",
-    "🏢 ARMZ",
+aba1, aba2, aba3, aba4, aba5, aba6, aba7, aba8, aba9 = st.tabs([
+    "🏠 Radar", "📈 Forecast", "🛒 Compras", "🔄 Transferências", "📦 Capital Parado", "🎯 ABC", "🏥 Locação", "🏢 ARMZ", "📊 Microtech"
 ])
 
-cols_forecast = [
-    "Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Valor_Estoque", "Qtd_30d", "Qtd_180d",
-    "Forecast_30d", "Estoque_Segurança", "Cobertura", "Cobertura_Dias", "Excesso_Estoque", "Comprar_Qtd", "Comprar_R$", "Status", "Ação", "Score_Oportunidade", "Classe ABC"
-]
+cols_forecast = ["Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Valor_Estoque", "Qtd_30d", "Qtd_180d", "Forecast_30d", "Estoque_Segurança", "Cobertura_Dias", "Cobertura_Meses", "Excesso_Estoque", "Excesso_R$", "Comprar_Qtd", "Comprar_R$", "Status", "Ação", "Score_Oportunidade", "Classe ABC Receita"]
 
 with aba1:
     st.markdown("<div class='section-title'>Radar Executivo</div>", unsafe_allow_html=True)
-    radar = view.sort_values(["Score_Oportunidade", "Comprar_R$", "Valor_Estoque"], ascending=False)[cols_forecast].copy()
-    st.dataframe(
-        formatar_tabela(radar),
-        use_container_width=True,
-        hide_index=True,
-    )
+    radar = view.sort_values(["Score_Oportunidade", "Comprar_R$", "Valor_Estoque"], ascending=False)[cols_forecast]
+    df_view(radar)
     c1, c2 = st.columns(2)
     with c1:
         status_df = view.groupby("Status", as_index=False).agg(Produtos=("Produto", "count"))
@@ -617,12 +638,11 @@ with aba1:
 
 with aba2:
     st.markdown("<div class='section-title'>Forecast Inteligente</div>", unsafe_allow_html=True)
-    st.dataframe(formatar_tabela(view.sort_values("Cobertura_Dias")[cols_forecast]), use_container_width=True, hide_index=True)
+    df_view(view.sort_values("Cobertura_Dias")[cols_forecast])
 
 with aba3:
     st.markdown("<div class='section-title'>Compras Recomendadas</div>", unsafe_allow_html=True)
-    compra_view = compras.sort_values(["Status", "Comprar_R$"], ascending=[True, False])[cols_forecast]
-    st.dataframe(formatar_tabela(compra_view), use_container_width=True, hide_index=True)
+    df_view(compras.sort_values(["Status", "Comprar_R$"], ascending=[True, False])[cols_forecast])
 
 with aba4:
     st.markdown("<div class='section-title'>Transferências entre ARMZ</div>", unsafe_allow_html=True)
@@ -630,52 +650,59 @@ with aba4:
         st.success("Nenhuma transferência recomendada com os critérios atuais.")
     else:
         tv = transferencias[transferencias["Produto"].isin(view["Produto"])].copy()
-        st.dataframe(formatar_tabela(tv), use_container_width=True, hide_index=True)
+        df_view(tv)
 
 with aba5:
     st.markdown("<div class='section-title'>Capital Parado e Sem Giro</div>", unsafe_allow_html=True)
     parado = view[(view["Status"].eq("⚫ Sem Giro")) | (view["Dias_Sem_Giro"] >= 90)].copy()
-    parado["Faixa Sem Giro"] = pd.cut(
-        parado["Dias_Sem_Giro"].fillna(9999),
-        bins=[-1, 90, 180, 365, 99999],
-        labels=["Até 90 dias", "90 a 180 dias", "180 a 365 dias", "> 365 dias / sem histórico"],
-    )
-    st.dataframe(formatar_tabela(parado.sort_values("Valor_Estoque", ascending=False)[[
-        "Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Valor_Estoque", "Última_Movimentação", "Dias_Sem_Giro", "Faixa Sem Giro", "Status"
-    ]]), use_container_width=True, hide_index=True)
+    parado["Faixa Sem Giro"] = pd.cut(parado["Dias_Sem_Giro"].fillna(9999), bins=[-1, 90, 180, 365, 99999], labels=["Até 90 dias", "90 a 180 dias", "180 a 365 dias", "> 365 dias / sem histórico"])
+    df_view(parado.sort_values("Valor_Estoque", ascending=False)[["Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Valor_Estoque", "Última_Movimentação", "Dias_Sem_Giro", "Faixa Sem Giro", "Status"]])
 
 with aba6:
     st.markdown("<div class='section-title'>Curva ABC</div>", unsafe_allow_html=True)
-    abc_view = view.sort_values("Receita_Total", ascending=False)[[
-        "Produto", "Descrição", "Receita_Total", "Qtd_Total", "Valor_Estoque", "Classe ABC", "Status"
-    ]]
-    st.dataframe(formatar_tabela(abc_view), use_container_width=True, hide_index=True)
-    abc_chart = abc_view.groupby("Classe ABC", as_index=False).agg(Receita=("Receita_Total", "sum"), Produtos=("Produto", "count"))
-    st.plotly_chart(px.bar(abc_chart, x="Classe ABC", y="Receita", text="Produtos", title="Receita por Classe ABC"), use_container_width=True)
+    abc_view = view.sort_values("Receita_Total", ascending=False)[["Produto", "Descrição", "Receita_Total", "Qtd_Total", "Valor_Estoque", "Classe ABC Receita", "Status"]]
+    df_view(abc_view)
+    abc_chart = abc_view.groupby("Classe ABC Receita", as_index=False).agg(Receita=("Receita_Total", "sum"), Produtos=("Produto", "count"))
+    st.plotly_chart(px.bar(abc_chart, x="Classe ABC Receita", y="Receita", text="Produtos", title="Receita por Classe ABC"), use_container_width=True)
 
 with aba7:
-    st.markdown("<div class='section-title'>Inteligência de Locação</div>", unsafe_allow_html=True)
-    lv = locacao[locacao["Produto"].isin(view["Produto"])].copy()
+    st.markdown("<div class='section-title'>Parque de Locação por Recorrência</div>", unsafe_allow_html=True)
+    lv = locacao[locacao["Produto"].isin(view["Produto"])] if not locacao.empty else pd.DataFrame()
     if lv.empty:
         st.info("Não há itens de locação identificados nos filtros atuais.")
     else:
-        st.dataframe(formatar_tabela(lv[[
-            "Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Qtd_Locacao", "Receita_Locacao", "Índice_Pressão_Locação", "Status", "Comprar_Qtd"
-        ]]), use_container_width=True, hide_index=True)
+        df_view(lv[["Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Clientes_Ativos_Estimados", "Meses_Consecutivos_Max", "Score_Recorrência", "Receita_Locacao", "Índice_Ocupação_Estimado", "Sinal_Investimento"]])
         st.plotly_chart(px.bar(lv.head(15), x="Produto", y="Receita_Locacao", title="Top 15 Receita de Locação"), use_container_width=True)
 
 with aba8:
     st.markdown("<div class='section-title'>Análise por ARMZ</div>", unsafe_allow_html=True)
-    resumo_armz = armz_view.groupby("ARMZ", as_index=False).agg(
-        Valor_Estoque=("Valor_ARMZ", "sum"),
-        Estoque_Disponivel=("Disponível_ARMZ", "sum"),
-        Produtos=("Produto", "nunique"),
-    )
-    st.dataframe(formatar_tabela(resumo_armz.sort_values("Valor_Estoque", ascending=False)), use_container_width=True, hide_index=True)
+    resumo_armz = armz_view.groupby("ARMZ", as_index=False).agg(Valor_Estoque=("Valor_ARMZ", "sum"), Estoque_Disponivel=("Disponível_ARMZ", "sum"), Produtos=("Produto", "nunique"))
+    df_view(resumo_armz.sort_values("Valor_Estoque", ascending=False))
     st.plotly_chart(px.bar(resumo_armz.sort_values("Valor_Estoque", ascending=False), x="ARMZ", y="Valor_Estoque", title="Valor em Estoque por ARMZ"), use_container_width=True)
-    st.dataframe(formatar_tabela(armz_view.sort_values(["Produto", "ARMZ"])), use_container_width=True, hide_index=True)
+    df_view(armz_view.sort_values(["Produto", "ARMZ"]))
 
-# Download consolidado
+with aba9:
+    st.markdown("<div class='section-title'>Planejamento Estratégico Microtech</div>", unsafe_allow_html=True)
+    if not micro_bytes:
+        st.info("Envie o arquivo de planejamento Microtech ou mantenha `/dados/microtech.xlsx` no Git.")
+    else:
+        try:
+            micro_book = load_microtech(micro_bytes)
+            micro_resumo, micro_abas = summarize_microtech(micro_book)
+            df_view(micro_abas)
+            if micro_resumo.empty:
+                st.warning("Não consegui identificar automaticamente SKU e colunas numéricas de forecast. A tabela acima mostra as abas disponíveis para ajuste do parser.")
+            else:
+                # Cruza Microtech com estoque quando possível.
+                micro_resumo["Produto"] = micro_resumo["SKU"].map(produto_base)
+                micro_join = micro_resumo.merge(view[["Produto", "Estoque_Disponível", "Valor_Estoque", "Grupo", "Status"]], on="Produto", how="left")
+                micro_join["Cobertura_Estratégica_Períodos"] = np.where(micro_join["Media_Periodo"] > 0, micro_join["Estoque_Disponível"] / micro_join["Media_Periodo"], np.nan)
+                df_view(micro_join.sort_values("Total_Planejado", ascending=False).head(300))
+                st.plotly_chart(px.bar(micro_join.head(20), x="SKU", y="Total_Planejado", title="Top 20 SKUs Microtech - Planejamento"), use_container_width=True)
+        except Exception as e:
+            st.error("Não consegui processar o arquivo Microtech automaticamente.")
+            st.exception(e)
+
 st.divider()
 excel_bytes = to_excel_download({
     "Radar Executivo": view[cols_forecast].sort_values("Score_Oportunidade", ascending=False),
@@ -685,11 +712,5 @@ excel_bytes = to_excel_download({
     "ARMZ": armz_view,
     "Locacao": locacao[locacao["Produto"].isin(view["Produto"])] if not locacao.empty else pd.DataFrame(),
 })
-st.download_button(
-    "📥 Baixar análise em Excel",
-    data=excel_bytes,
-    file_name=f"first_forecast_estoque_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
-
+st.download_button("📥 Baixar análise em Excel", data=excel_bytes, file_name=f"first_forecast_estoque_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"Última atualização da análise: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")

@@ -1,23 +1,30 @@
-# FIRST Intelligence
+# FIRST Intelligence - Forecast Estratégico de Estoque, Compras e Locação
 
-Forecast estratégico de estoque, compras e locação.
+## Como usar
 
-## Como usar no Streamlit Cloud
+1. Mantenha os arquivos fixos em `dados/`:
+   - `faturamento.xlsx` com guia `Base`
+   - `estoque.xlsx` MATR260
+   - `microtech.xlsx` opcional
 
-Mantenha os arquivos padrão na pasta `dados`:
+2. Rode o app:
 
-- `dados/faturamento.xlsx`
-- `dados/estoque.xlsx`
-- `dados/contratos.xlsx` opcional
+```bash
+streamlit run app.py
+```
 
-O app usa esses arquivos automaticamente. Também é possível substituir as bases pela tela lateral com upload temporário.
+3. No menu lateral, é possível substituir temporariamente as bases por upload.
 
-## Ajustes da versão
+## Atualização diária incremental
 
-- Locação não entra como consumo de estoque.
-- Locação alimenta apenas a aba de inteligência de locação.
+Use o campo **Adicionar Faturamento Diário** para enviar um ou mais arquivos diários.
+O app soma apenas linhas novas, ignorando duplicidades por Nota/Data/Produto/Cliente/Quantidade/Valor.
+
+## Regras principais
+
+- Forecast padrão: horizonte de 30 dias.
+- Locação recorrente não entra como consumo de estoque.
+- Faturamento de locação alimenta a aba Parque de Locação por Recorrência.
 - Grupo oficial vem do estoque/MATR260.
-- Valores monetários exibidos em formato brasileiro.
-- Legendas técnicas removidas das telas executivas.
-- Cobertura exibida em dias e meses.
-- Tratamento de códigos com sufixos como `_RV`, `_TC`, `_AT`.
+- Produtos com sufixos como `_RV`, `_TC`, `_AT`, `-RV` são agrupados pelo produto-base.
+- Aba Microtech usa o arquivo de planejamento do fabricante quando disponível.
