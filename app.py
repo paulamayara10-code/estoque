@@ -156,6 +156,63 @@ st.markdown(
         .summary-line {display:flex; align-items:center; gap:10px; padding: 10px 8px; border-bottom:1px solid #eef3fa;}
         .summary-line:last-child {border-bottom:0;}
         .summary-badge {width:10px; height:10px; border-radius:999px; display:inline-block;}
+
+        /* Correção final de contraste da sidebar */
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] label p,
+        [data-testid="stSidebar"] .stMarkdown p,
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 {
+            color: #ffffff !important;
+            opacity: 1 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] section {
+            background: #ffffff !important;
+            border: 1px solid #d6e2f2 !important;
+            border-radius: 14px !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] section * {
+            color: #071b35 !important;
+            opacity: 1 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button,
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button * {
+            background: #ffffff !important;
+            color: #0b3c78 !important;
+            opacity: 1 !important;
+            font-weight: 800 !important;
+        }
+
+        [data-testid="stSidebar"] small {
+            color: #d8e7ff !important;
+            opacity: 1 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] input {
+            background: #ffffff !important;
+            color: #071b35 !important;
+            opacity: 1 !important;
+            font-weight: 800 !important;
+            border: 1px solid #d6e2f2 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] button,
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] button * {
+            background: #ffffff !important;
+            color: #071b35 !important;
+            opacity: 1 !important;
+            font-weight: 900 !important;
+        }
+
+        [data-testid="stSidebar"] .stNumberInput label,
+        [data-testid="stSidebar"] .stNumberInput label p {
+            color: #ffffff !important;
+            opacity: 1 !important;
+        }
     </style>
     """,
     unsafe_allow_html=True,
