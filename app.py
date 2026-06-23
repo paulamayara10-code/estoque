@@ -44,9 +44,69 @@ st.markdown(
         [data-testid="stSidebar"] {
             background: linear-gradient(180deg, #06162b 0%, #08284d 58%, #071b35 100%);
         }
-        [data-testid="stSidebar"] * {color: #f8fbff !important;}
-        [data-testid="stSidebar"] label, [data-testid="stSidebar"] .stMarkdown p {font-weight: 600;}
+        [data-testid="stSidebar"] {
+            color: #f8fbff;
+        }
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] .stMarkdown,
+        [data-testid="stSidebar"] .stMarkdown p,
+        [data-testid="stSidebar"] label {
+            color: #f8fbff !important;
+            font-weight: 700;
+        }
         [data-testid="stSidebar"] section {background: transparent;}
+
+        /* Mantém os controles legíveis no fundo azul */
+        [data-testid="stSidebar"] input,
+        [data-testid="stSidebar"] textarea,
+        [data-testid="stSidebar"] select,
+        [data-testid="stSidebar"] button,
+        [data-testid="stSidebar"] [data-baseweb="input"],
+        [data-testid="stSidebar"] [data-baseweb="select"],
+        [data-testid="stSidebar"] [data-baseweb="input"] *,
+        [data-testid="stSidebar"] [data-baseweb="select"] *,
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] *,
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button,
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button * {
+            color: #071b35 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] section {
+            background: rgba(255,255,255,.98) !important;
+            border: 1px solid rgba(255,255,255,.45) !important;
+            border-radius: 14px !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] small,
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] span,
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] p {
+            color: #d8e7ff !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button {
+            background: #ffffff !important;
+            border: 1px solid #d9e4f2 !important;
+            border-radius: 10px !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] input {
+            background: #ffffff !important;
+            color: #071b35 !important;
+            border-radius: 10px !important;
+            font-weight: 700 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stNumberInput"] button {
+            background: #ffffff !important;
+            color: #071b35 !important;
+            border: 1px solid #d9e4f2 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stCheckbox"] label span {
+            color: #f8fbff !important;
+        }
         .first-header {
             background: linear-gradient(135deg, #071b35 0%, #0b3c78 55%, #1167b1 100%);
             padding: 28px 32px; border-radius: 18px; color: white; margin-bottom: 18px;
