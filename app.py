@@ -452,6 +452,63 @@ def load_estoque(file_bytes: bytes, sheet_name: Optional[str] = None) -> pd.Data
     return out
 
 
+
+@st.cache_data(show_spinner=False)
+def load_pedidos_abertos(file_bytes: bytes, sheet_name: Optional[str] = None) -> pd.DataFrame:
+    """Lê MATR120 - Pedido de Compras / Autorização de Entrega.
+
+    O relatório normalmente vem com a primeira linha como cabeçalho real dentro da planilha.
+    A função localiza automaticamente a linha que contém Num.PC, Produto e Quant. Receber.
+    """
+    xl = pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
+    target = sheet_name
+    if target is None:
+        for s in xl.sheet_names:
+            ns = normalize_col(s)
+            if "PEDIDO" in ns or "AUTORIZ" in ns:
+                target = s
+                break
+        target = target or xl.sheet_names[-1]
+
+    raw = pd.read_excel(BytesIO(file_bytes), sheet_name=target, engine="openpyxl", header=None)
+    header_row = None
+    for i in range(min(len(raw), 30)):
+        vals = [normalize_col(v) for v in raw.iloc[i].tolist()]
+        if any("NUM_PC" in v or v == "PEDIDO" for v in vals) and "PRODUTO" in vals:
+            header_row = i
+            break
+    if header_row is None:
+        # fallback para leitura padrão
+        df = pd.read_excel(BytesIO(file_bytes), sheet_name=target, engine="openpyxl")
+    else:
+        df = raw.iloc[header_row + 1:].copy()
+        df.columns = [str(c).strip() for c in raw.iloc[header_row].tolist()]
+    df = df.dropna(how="all").copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    col_pc = find_col(df, ["Num.PC", "Num PC", "Pedido", "PC"], required=False)
+    col_for = find_col(df, ["Razao Social", "Razão Social", "Fornecedor"], required=False)
+    col_prod = find_col(df, ["Produto", "Codigo", "Código"])
+    col_desc = find_col(df, ["Descricao", "Descrição", "DESCRICAO"], required=False)
+    col_emissao = find_col(df, ["Emissao", "Emissão", "Data Emissao"], required=False)
+    col_entrega = find_col(df, ["Entrega", "Data Entrega"], required=False)
+    col_qtd = find_col(df, ["Quant. Receber", "Quantidade Receber", "Qtd Receber", "Saldo Receber", "Quantidade"], required=False)
+    col_valor = find_col(df, ["Saldo Receber", "Vlr.Total", "Valor Total", "Vlr Total"], required=False)
+
+    out = pd.DataFrame()
+    out["PC"] = df[col_pc].fillna("").astype(str).str.strip() if col_pc else ""
+    out["Fornecedor"] = df[col_for].fillna("").astype(str).str.strip() if col_for else ""
+    out["Produto_Original"] = df[col_prod].map(normalize_code)
+    out["Produto"] = out["Produto_Original"].map(produto_base)
+    out["Descrição Pedido"] = df[col_desc].fillna("").astype(str).str.strip() if col_desc else ""
+    out["Emissão PC"] = pd.to_datetime(df[col_emissao], errors="coerce", dayfirst=True) if col_emissao else pd.NaT
+    out["Entrega Prevista"] = pd.to_datetime(df[col_entrega], errors="coerce", dayfirst=True) if col_entrega else pd.NaT
+    out["Pedido_Aberto_Qtd"] = pd.to_numeric(df[col_qtd], errors="coerce").fillna(0) if col_qtd else 0
+    out["Pedido_Aberto_R$"] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0) if col_valor else 0
+    out = out[(out["Produto"] != "") & (out["Pedido_Aberto_Qtd"] > 0)].copy()
+    return out
+
+
 def combinar_faturamentos(base: pd.DataFrame, diarios: list[pd.DataFrame]) -> tuple[pd.DataFrame, int, int]:
     if not diarios:
         return base.copy(), 0, 0
@@ -713,7 +770,7 @@ def build_microtech_strategy(file_bytes: bytes) -> dict[str, pd.DataFrame]:
 
     return {"rolling": rolling, "sku_qty": sku_qty, "familia_qty": fam_qty, "sku_money": sku_money, "pvs": pvs, "master": master}
 
-def build_forecast(estoque: pd.DataFrame, faturamento: pd.DataFrame, horizonte: int = 30, dias_seguranca: int = 15):
+def build_forecast(estoque: pd.DataFrame, faturamento: pd.DataFrame, pedidos: Optional[pd.DataFrame] = None, horizonte: int = 30, dias_seguranca: int = 15):
     fat_all = faturamento.copy()
     fat_consumo = fat_all[~fat_all["Tipo Operação"].eq("Locação")].copy()
 
@@ -746,7 +803,21 @@ def build_forecast(estoque: pd.DataFrame, faturamento: pd.DataFrame, horizonte: 
     base = est_total.merge(cad, on="Produto", how="left").merge(consumo_30, on="Produto", how="left").merge(consumo_180, on="Produto", how="left")
     base = base.merge(ultimo_mov, on="Produto", how="left").merge(receita_total, on="Produto", how="left").merge(loc, on="Produto", how="left")
 
-    for c in ["Qtd_30d", "Receita_30d", "Qtd_180d", "Receita_180d", "Receita_Total", "Receita_Consumo", "Qtd_Total", "Qtd_Locacao", "Receita_Locacao", "Clientes_Locacao"]:
+    if pedidos is not None and not pedidos.empty:
+        ped_resumo = pedidos.groupby("Produto", as_index=False).agg(**{
+            "Pedido_Aberto_Qtd": ("Pedido_Aberto_Qtd", "sum"),
+            "Pedido_Aberto_R$": ("Pedido_Aberto_R$", "sum"),
+            "Primeira_Entrega": ("Entrega Prevista", "min"),
+            "Qtde_PCs": ("PC", "nunique"),
+        })
+        base = base.merge(ped_resumo, on="Produto", how="left")
+    else:
+        base["Pedido_Aberto_Qtd"] = 0
+        base["Pedido_Aberto_R$"] = 0
+        base["Primeira_Entrega"] = pd.NaT
+        base["Qtde_PCs"] = 0
+
+    for c in ["Qtd_30d", "Receita_30d", "Qtd_180d", "Receita_180d", "Receita_Total", "Receita_Consumo", "Qtd_Total", "Qtd_Locacao", "Receita_Locacao", "Clientes_Locacao", "Pedido_Aberto_Qtd", "Pedido_Aberto_R$", "Qtde_PCs"]:
         base[c] = pd.to_numeric(base[c], errors="coerce").fillna(0)
 
     base["Descrição"] = base["Descrição_Faturamento"].fillna(base["Descrição_Estoque"]).fillna("")
@@ -767,8 +838,14 @@ def build_forecast(estoque: pd.DataFrame, faturamento: pd.DataFrame, horizonte: 
     base["Excesso_Estoque"] = (base["Estoque_Disponível"] - (base["Forecast_30d"] + base["Estoque_Segurança"])).clip(lower=0)
     base["Necessidade_Bruta"] = base["Forecast_30d"] + base["Estoque_Segurança"] - base["Estoque_Disponível"]
     base["Comprar_Qtd"] = np.ceil(base["Necessidade_Bruta"].clip(lower=0)).astype(int)
+    base["Estoque_Projetado"] = base["Estoque_Disponível"] + base["Pedido_Aberto_Qtd"]
+    base["Necessidade_Líquida"] = base["Forecast_30d"] + base["Estoque_Segurança"] - base["Estoque_Projetado"]
+    base["Comprar_Líquido_Qtd"] = np.ceil(base["Necessidade_Líquida"].clip(lower=0)).astype(int)
+    base["Cobertura_Projetada_Dias"] = np.where(base["Consumo_Diário_Forecast"] > 0, base["Estoque_Projetado"] / base["Consumo_Diário_Forecast"], np.inf)
+    base["Cobertura_Projetada_Meses"] = base["Cobertura_Projetada_Dias"] / 30
     base["Custo_Médio"] = np.where(base["Estoque_Disponível"] > 0, base["Valor_Estoque"] / base["Estoque_Disponível"], 0)
     base["Comprar_R$"] = base["Comprar_Qtd"] * base["Custo_Médio"]
+    base["Comprar_Líquido_R$"] = base["Comprar_Líquido_Qtd"] * base["Custo_Médio"]
     base["Excesso_R$"] = base["Excesso_Estoque"] * base["Custo_Médio"]
     base["Dias_Sem_Giro"] = np.where(base["Última_Movimentação"].notna(), (data_ref - base["Última_Movimentação"]).dt.days, np.nan)
 
@@ -785,13 +862,13 @@ def build_forecast(estoque: pd.DataFrame, faturamento: pd.DataFrame, horizonte: 
 
     base["Status"] = base.apply(status, axis=1)
     base["Ação"] = np.select(
-        [base["Comprar_Qtd"] > 0, base["Status"].eq("⚫ Sem Giro") & (base["Valor_Estoque"] > 0), base["Excesso_Estoque"] > base["Forecast_30d"] * 3],
-        ["Comprar", "Avaliar capital parado", "Avaliar excesso"],
+        [base["Comprar_Líquido_Qtd"] > 0, (base["Comprar_Qtd"] > 0) & (base["Pedido_Aberto_Qtd"] > 0), base["Status"].eq("⚫ Sem Giro") & (base["Valor_Estoque"] > 0), base["Excesso_Estoque"] > base["Forecast_30d"] * 3],
+        ["Comprar", "Aguardar pedido aberto", "Avaliar capital parado", "Avaliar excesso"],
         default="Manter",
     )
     base["Score_Oportunidade"] = (
         np.where(base["Status"].eq("🔴 Crítico"), 45, 0) + np.where(base["Status"].eq("🟠 Atenção"), 25, 0) +
-        np.where(base["Comprar_Qtd"] > 0, 25, 0) + np.where(base["Receita_Locacao"] > 0, 10, 0) +
+        np.where(base["Comprar_Líquido_Qtd"] > 0, 25, 0) + np.where(base["Receita_Locacao"] > 0, 10, 0) +
         np.where(base["Receita_Total"] > base["Receita_Total"].quantile(0.80), 15, 0)
     ).clip(0, 100)
 
@@ -809,7 +886,7 @@ def build_forecast(estoque: pd.DataFrame, faturamento: pd.DataFrame, horizonte: 
     armz["Cobertura_ARMZ_Dias"] = np.where(armz["Consumo_Diário_Forecast"].fillna(0) > 0, armz["Disponível_ARMZ"] / armz["Consumo_Diário_Forecast"], np.inf)
 
     transfer_rows = []
-    base_no_buy = base[base["Comprar_Qtd"].eq(0) & (base["Consumo_Diário_Forecast"] > 0)]
+    base_no_buy = base[base["Comprar_Líquido_Qtd"].eq(0) & (base["Consumo_Diário_Forecast"] > 0)]
     for _, prod in base_no_buy.iterrows():
         p = prod["Produto"]
         part = armz[armz["Produto"].eq(p)].copy()
@@ -884,6 +961,7 @@ with st.sidebar:
     fat_file = st.file_uploader("Atualizar Faturamento Base", type=["xlsx"], help="Opcional. Se não enviar, usa /dados/faturamento.xlsx")
     diarios_files = st.file_uploader("Adicionar Faturamento Diário", type=["xlsx"], accept_multiple_files=True, help="Somente linhas novas serão somadas; duplicidades serão ignoradas.")
     est_file = st.file_uploader("Atualizar Estoque MATR260", type=["xlsx"], help="Opcional. Se não enviar, usa /dados/estoque.xlsx")
+    pedidos_file = st.file_uploader("Atualizar Pedidos em Aberto MATR120", type=["xlsx"], help="Opcional. Se não enviar, tenta usar /dados/pedidos.xlsx")
     micro_file = st.file_uploader("Atualizar Planejamento Microtech", type=["xlsx"], help="Opcional. Se não enviar, tenta usar /dados/microtech.xlsx")
 
     st.markdown("### ⚙️ Parâmetros")
@@ -892,6 +970,7 @@ with st.sidebar:
 # Carregar bases fixas ou upload
 fat_bytes = fat_file.getvalue() if fat_file else (file_bytes_from_path(DADOS_DIR / "faturamento.xlsx") if usar_git else None)
 est_bytes = est_file.getvalue() if est_file else (file_bytes_from_path(DADOS_DIR / "estoque.xlsx") if usar_git else None)
+pedidos_bytes = pedidos_file.getvalue() if pedidos_file else (file_bytes_from_path(DADOS_DIR / "pedidos.xlsx") if usar_git else None)
 micro_bytes = micro_file.getvalue() if micro_file else (file_bytes_from_path(DADOS_DIR / "microtech.xlsx") if usar_git else None)
 
 if not fat_bytes or not est_bytes:
@@ -905,7 +984,8 @@ try:
         diarios.append(load_faturamento(f.getvalue(), "Base", origem=f"Diário {idx}"))
     faturamento, linhas_diarias_adicionadas, linhas_duplicadas = combinar_faturamentos(faturamento_base, diarios)
     estoque = load_estoque(est_bytes)
-    forecast, armz, transferencias, locacao, data_ref = build_forecast(estoque, faturamento, horizonte=int(horizonte), dias_seguranca=int(dias_seguranca))
+    pedidos_abertos = load_pedidos_abertos(pedidos_bytes) if pedidos_bytes else pd.DataFrame()
+    forecast, armz, transferencias, locacao, data_ref = build_forecast(estoque, faturamento, pedidos=pedidos_abertos, horizonte=int(horizonte), dias_seguranca=int(dias_seguranca))
 except Exception as e:
     st.error("Não consegui processar os arquivos. Verifique se os relatórios estão no layout esperado.")
     st.exception(e)
@@ -957,7 +1037,7 @@ if filtro_armz:
 
 criticos = int(view["Status"].eq("🔴 Crítico").sum())
 sem_giro = int(view["Status"].eq("⚫ Sem Giro").sum())
-compras = view[view["Comprar_Qtd"] > 0]
+compras = view[view["Comprar_Líquido_Qtd"] > 0]
 capital_parado = view[(view["Status"].eq("⚫ Sem Giro")) & (view["Valor_Estoque"] > 0)]["Valor_Estoque"].sum()
 valor_estoque = view["Valor_Estoque"].sum()
 transf_count = len(transferencias[transferencias["Produto"].isin(view["Produto"])]) if not transferencias.empty else 0
@@ -966,14 +1046,14 @@ cobertura_media = view.replace([np.inf, -np.inf], np.nan)["Cobertura_Dias"].mean
 k1, k2, k3, k4 = st.columns(4)
 with k1: kpi_card("Valor Total em Estoque", brl(valor_estoque, short=True), "MATR260")
 with k2: kpi_card("Produtos Críticos", fmt_num(criticos), "Cobertura até 15 dias")
-with k3: kpi_card("Compras Recomendadas", brl(compras["Comprar_R$"].sum(), short=True), f"{len(compras)} produtos")
+with k3: kpi_card("Compras Recomendadas", brl(compras["Comprar_Líquido_R$"].sum(), short=True), f"{len(compras)} produtos")
 with k4: kpi_card("Capital Parado", brl(capital_parado, short=True), f"{sem_giro} produtos sem giro")
 
 k5, k6, k7, k8 = st.columns(4)
-with k5: kpi_card("Transferências", fmt_num(transf_count), "Sugestões entre ARMZ")
+with k5: kpi_card("Pedidos em Aberto", brl(view["Pedido_Aberto_R$"].sum(), short=True), f"{fmt_num(view['Pedido_Aberto_Qtd'].sum())} un. a receber")
 with k6:
     if not np.isnan(cobertura_media):
-        kpi_card("Cobertura Média", f"{fmt_num(cobertura_media/30, 1)} meses", f"{fmt_num(cobertura_media, 0)} dias")
+        kpi_card("Cobertura Média", f"{fmt_num(min(cobertura_media/30, 24), 1)} meses" + ("+" if cobertura_media/30 > 24 else ""), f"{fmt_num(cobertura_media, 0)} dias")
     else:
         kpi_card("Cobertura Média", "-", "Itens com consumo")
 with k7: kpi_card("Receita Locação", brl(view["Receita_Locacao"].sum(), short=True), "Não gera compra automática")
@@ -985,17 +1065,17 @@ with st.container():
     with s1:
         kpi_card("Risco de Ruptura", fmt_num(criticos), "Itens críticos")
     with s2:
-        kpi_card("Comprar", brl(compras["Comprar_R$"].sum(), short=True), f"{len(compras)} SKUs")
+        kpi_card("Comprar", brl(compras["Comprar_Líquido_R$"].sum(), short=True), f"{len(compras)} SKUs")
     with s3:
         kpi_card("Transferir", fmt_num(transf_count), "Antes de comprar")
     with s4:
         kpi_card("Revisar Capital", brl(capital_parado, short=True), "Sem giro / parado")
 
-aba1, aba2, aba3, aba4, aba5, aba6, aba7, aba8, aba9 = st.tabs([
-    "🏠 Radar", "📈 Forecast", "🛒 Compras", "🔄 Transferências", "📦 Capital Parado", "🎯 ABC", "🏥 Locação", "🏢 ARMZ", "📊 Microtech"
+aba1, aba2, aba3, aba4, aba5, aba6, aba7, aba8, aba9, aba10, aba11 = st.tabs([
+    "🏠 Radar", "📈 Forecast", "🛒 Compras", "🚚 Pedidos", "🧪 Simulador", "🔄 Transferências", "📦 Capital Parado", "🎯 ABC", "🏥 Locação", "🏢 ARMZ", "📊 Microtech"
 ])
 
-cols_forecast = ["Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Valor_Estoque", "Qtd_30d", "Qtd_180d", "Forecast_30d", "Estoque_Segurança", "Cobertura_Dias", "Cobertura_Meses", "Excesso_Estoque", "Excesso_R$", "Comprar_Qtd", "Comprar_R$", "Status", "Ação", "Score_Oportunidade", "Classe ABC Receita"]
+cols_forecast = ["Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Pedido_Aberto_Qtd", "Estoque_Projetado", "Valor_Estoque", "Qtd_30d", "Qtd_180d", "Forecast_30d", "Estoque_Segurança", "Cobertura_Dias", "Cobertura_Meses", "Cobertura_Projetada_Dias", "Excesso_Estoque", "Excesso_R$", "Comprar_Qtd", "Comprar_R$", "Comprar_Líquido_Qtd", "Comprar_Líquido_R$", "Status", "Ação", "Score_Oportunidade", "Classe ABC Receita"]
 
 with aba1:
     st.markdown("<div class='section-title'>Radar Executivo</div>", unsafe_allow_html=True)
@@ -1015,9 +1095,70 @@ with aba2:
 
 with aba3:
     st.markdown("<div class='section-title'>Compras Recomendadas</div>", unsafe_allow_html=True)
-    df_view(compras.sort_values(["Status", "Comprar_R$"], ascending=[True, False])[cols_forecast])
+    df_view(compras.sort_values(["Status", "Comprar_Líquido_R$"], ascending=[True, False])[cols_forecast])
 
 with aba4:
+    st.markdown("<div class='section-title'>Pedidos em Aberto MATR120</div>", unsafe_allow_html=True)
+    if 'pedidos_abertos' not in globals() or pedidos_abertos.empty:
+        st.info("Nenhum MATR120 carregado. Mantenha /dados/pedidos.xlsx no Git ou envie o arquivo na sidebar.")
+    else:
+        ped_view = pedidos_abertos[pedidos_abertos["Produto"].isin(view["Produto"])].copy()
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: kpi_card("PCs em Aberto", fmt_num(ped_view["PC"].nunique()), "Pedidos distintos")
+        with c2: kpi_card("Qtd a Receber", fmt_num(ped_view["Pedido_Aberto_Qtd"].sum()), "Unidades")
+        with c3: kpi_card("Saldo a Receber", brl(ped_view["Pedido_Aberto_R$"].sum(), short=True), "Valor em aberto")
+        atrasados = ped_view[ped_view["Entrega Prevista"].notna() & (ped_view["Entrega Prevista"] < pd.Timestamp.today().normalize())]
+        with c4: kpi_card("Entregas Atrasadas", fmt_num(len(atrasados)), "Linhas vencidas")
+        df_view(ped_view.sort_values(["Entrega Prevista", "Produto"])[["PC", "Fornecedor", "Produto", "Descrição Pedido", "Emissão PC", "Entrega Prevista", "Pedido_Aberto_Qtd", "Pedido_Aberto_R$"]])
+
+with aba5:
+    st.markdown("<div class='section-title'>Simulador de Demanda</div>", unsafe_allow_html=True)
+    sim_base = view.sort_values("Produto").copy()
+    if sim_base.empty:
+        st.info("Não há produtos disponíveis nos filtros atuais.")
+    else:
+        produtos_opcoes = (sim_base["Produto"] + " | " + sim_base["Descrição"].fillna("")).tolist()
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            produto_sel = st.selectbox("Produto", produtos_opcoes)
+        with col2:
+            venda_prevista = st.number_input("Quantidade prevista", min_value=0.0, value=0.0, step=1.0)
+        with col3:
+            considerar_pedidos = st.checkbox("Considerar pedidos em aberto", value=True)
+        considerar_forecast = st.checkbox("Considerar forecast do período", value=True)
+        produto_codigo = produto_sel.split(" | ")[0]
+        row = sim_base[sim_base["Produto"].eq(produto_codigo)].iloc[0]
+        estoque_atual = float(row.get("Estoque_Disponível", 0))
+        pedido_aberto = float(row.get("Pedido_Aberto_Qtd", 0)) if considerar_pedidos else 0
+        forecast_periodo = float(row.get("Forecast_30d", 0)) if considerar_forecast else 0
+        saldo_projetado = estoque_atual + pedido_aberto - forecast_periodo - float(venda_prevista)
+        falta = max(0, -saldo_projetado)
+        s1, s2, s3, s4 = st.columns(4)
+        with s1: kpi_card("Estoque Atual", fmt_num(estoque_atual), "Disponível")
+        with s2: kpi_card("Pedidos em Aberto", fmt_num(pedido_aberto), "A receber")
+        with s3: kpi_card("Forecast Considerado", fmt_num(forecast_periodo), "Consumo previsto")
+        with s4: kpi_card("Saldo Projetado", fmt_num(saldo_projetado), "Após demanda")
+        if saldo_projetado >= 0:
+            st.success("✅ Suporta a venda prevista com os critérios selecionados.")
+        else:
+            st.error(f"🔴 Não suporta. Falta estimada: {fmt_num(falta)} unidade(s).")
+            # Sugere transferência se houver sobra em outro ARMZ
+            armz_prod = armz[armz["Produto"].eq(produto_codigo)].sort_values("Disponível_ARMZ", ascending=False)
+            if not armz_prod.empty:
+                df_view(armz_prod[["Produto", "ARMZ", "Disponível_ARMZ", "Valor_ARMZ", "Cobertura_ARMZ_Dias"]])
+        sim_result = pd.DataFrame([{
+            "Produto": produto_codigo,
+            "Descrição": row.get("Descrição", ""),
+            "Estoque Atual": estoque_atual,
+            "Pedidos em Aberto": pedido_aberto,
+            "Forecast Considerado": forecast_periodo,
+            "Venda Prevista": venda_prevista,
+            "Saldo Projetado": saldo_projetado,
+            "Falta": falta
+        }])
+        df_view(sim_result)
+
+with aba6:
     st.markdown("<div class='section-title'>Transferências entre ARMZ</div>", unsafe_allow_html=True)
     if transferencias.empty:
         st.success("Nenhuma transferência recomendada com os critérios atuais.")
@@ -1025,20 +1166,20 @@ with aba4:
         tv = transferencias[transferencias["Produto"].isin(view["Produto"])].copy()
         df_view(tv)
 
-with aba5:
+with aba7:
     st.markdown("<div class='section-title'>Capital Parado e Sem Giro</div>", unsafe_allow_html=True)
     parado = view[(view["Status"].eq("⚫ Sem Giro")) | (view["Dias_Sem_Giro"] >= 90)].copy()
     parado["Faixa Sem Giro"] = pd.cut(parado["Dias_Sem_Giro"].fillna(9999), bins=[-1, 90, 180, 365, 99999], labels=["Até 90 dias", "90 a 180 dias", "180 a 365 dias", "> 365 dias / sem histórico"])
     df_view(parado.sort_values("Valor_Estoque", ascending=False)[["Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Valor_Estoque", "Última_Movimentação", "Dias_Sem_Giro", "Faixa Sem Giro", "Status"]])
 
-with aba6:
+with aba8:
     st.markdown("<div class='section-title'>Curva ABC</div>", unsafe_allow_html=True)
     abc_view = view.sort_values("Receita_Total", ascending=False)[["Produto", "Descrição", "Receita_Total", "Qtd_Total", "Valor_Estoque", "Classe ABC Receita", "Status"]]
     df_view(abc_view)
     abc_chart = abc_view.groupby("Classe ABC Receita", as_index=False).agg(Receita=("Receita_Total", "sum"), Produtos=("Produto", "count"))
     st.plotly_chart(px.bar(abc_chart, x="Classe ABC Receita", y="Receita", text="Produtos", title="Receita por Classe ABC"), use_container_width=True)
 
-with aba7:
+with aba9:
     st.markdown("<div class='section-title'>Parque de Locação por Recorrência</div>", unsafe_allow_html=True)
     lv = locacao[locacao["Produto"].isin(view["Produto"])] if not locacao.empty else pd.DataFrame()
     if lv.empty:
@@ -1047,14 +1188,14 @@ with aba7:
         df_view(lv[["Produto", "Descrição", "Grupo", "Linha", "Estoque_Disponível", "Clientes_Ativos_Estimados", "Meses_Consecutivos_Max", "Score_Recorrência", "Receita_Locacao", "Índice_Ocupação_Estimado", "Sinal_Investimento"]])
         st.plotly_chart(px.bar(lv.head(15), x="Produto", y="Receita_Locacao", title="Top 15 Receita de Locação"), use_container_width=True)
 
-with aba8:
+with aba10:
     st.markdown("<div class='section-title'>Análise por ARMZ</div>", unsafe_allow_html=True)
     resumo_armz = armz_view.groupby("ARMZ", as_index=False).agg(Valor_Estoque=("Valor_ARMZ", "sum"), Estoque_Disponivel=("Disponível_ARMZ", "sum"), Produtos=("Produto", "nunique"))
     df_view(resumo_armz.sort_values("Valor_Estoque", ascending=False))
     st.plotly_chart(px.bar(resumo_armz.sort_values("Valor_Estoque", ascending=False), x="ARMZ", y="Valor_Estoque", title="Valor em Estoque por ARMZ"), use_container_width=True)
     df_view(armz_view.sort_values(["Produto", "ARMZ"]))
 
-with aba9:
+with aba11:
     st.markdown("<div class='section-title'>Planejamento Estratégico Microtech</div>", unsafe_allow_html=True)
     if not micro_bytes:
         st.info("Envie o arquivo de planejamento Microtech ou mantenha `/dados/microtech.xlsx` no Git.")
@@ -1152,7 +1293,8 @@ with aba9:
 st.divider()
 excel_bytes = to_excel_download({
     "Radar Executivo": view[cols_forecast].sort_values("Score_Oportunidade", ascending=False),
-    "Compras": compras[cols_forecast].sort_values("Comprar_R$", ascending=False),
+    "Compras": compras[cols_forecast].sort_values("Comprar_Líquido_R$", ascending=False),
+    "Pedidos Abertos": pedidos_abertos if 'pedidos_abertos' in globals() and not pedidos_abertos.empty else pd.DataFrame(),
     "Transferencias": transferencias if not transferencias.empty else pd.DataFrame(columns=["Produto", "Descrição", "Origem_ARMZ", "Destino_ARMZ", "Qtd_Sugerida", "Motivo"]),
     "Capital Parado": view[(view["Status"].eq("⚫ Sem Giro")) | (view["Dias_Sem_Giro"] >= 90)],
     "ARMZ": armz_view,
